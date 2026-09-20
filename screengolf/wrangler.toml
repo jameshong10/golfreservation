@@ -3,7 +3,7 @@ compatibility_date = "2025-06-01"
 pages_build_output_dir = "public"
 
 # D1 데이터베이스 연결
-# database_id 는 `wrangler d1 create screengolf` 실행 후 나오는 값으로 바꿔 넣으세요.
+# database_id = 54bca71f-e4bc-4530-97a7-f4cfeeeca9ce
 [[d1_databases]]
 binding = "DB"
 database_name = "screengolf"
