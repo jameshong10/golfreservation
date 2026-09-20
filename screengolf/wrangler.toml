@@ -3,8 +3,15 @@ compatibility_date = "2025-06-01"
 pages_build_output_dir = "public"
 
 # D1 데이터베이스 연결
-# database_id = 54bca71f-e4bc-4530-97a7-f4cfeeeca9ce
 [[d1_databases]]
 binding = "DB"
 database_name = "screengolf"
-database_id = "여기에-D1-database-id-를-붙여넣으세요"
+name = "screengolf"
+compatibility_date = "2025-06-01"
+pages_build_output_dir = "public"
+
+# D1 데이터베이스 연결
+[[d1_databases]]
+binding = "DB"
+database_name = "screengolf"
+database_id = "54bca71f-e4bc-4530-97a7-f4cfeeeca9ce"
