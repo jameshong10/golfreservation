@@ -1,0 +1,261 @@
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css");
+
+:root {
+  --ink: #16241c;
+  --fairway: #2e6b44;
+  --fairway-dk: #1d4a2e;
+  --paper: #f2f4ef;
+  --card: #ffffff;
+  --line: #d9dfd3;
+  --line-soft: #e8ece3;
+  --muted: #6d7a6b;
+  --flag: #bf432a;
+  --flag-soft: #fbeeea;
+  --guest: #8a6d20;
+  --guest-soft: #faf3df;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgba(22, 36, 28, 0.06);
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+    "Malgun Gothic", sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+
+/* ---------- 레이아웃 ---------- */
+
+.shell { max-width: 540px; margin: 0 auto; padding: 0 16px 96px; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--fairway-dk); color: #fff;
+  margin: 0 -16px 18px; padding: 14px 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+.topbar h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.02em; }
+.topbar .who { margin-left: auto; font-size: 13px; opacity: 0.85; display: flex; align-items: center; gap: 8px; }
+.topbar .who button {
+  background: rgba(255,255,255,.14); border: 0; color: #fff;
+  padding: 5px 10px; border-radius: 999px; font-size: 12px; cursor: pointer;
+}
+.topbar .who button:hover { background: rgba(255,255,255,.24); }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--line); }
+.tabs button {
+  flex: 1; background: none; border: 0; padding: 10px 4px 12px;
+  font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; position: relative;
+}
+.tabs button[aria-selected="true"] { color: var(--fairway); border-bottom-color: var(--fairway); }
+.tabs .badge {
+  display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 5px;
+  background: var(--flag); color: #fff; border-radius: 999px;
+  font-size: 11px; line-height: 18px; vertical-align: 1px;
+}
+
+/* ---------- 카드 ---------- */
+
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 16px; margin-bottom: 12px;
+}
+.card.next { border-color: var(--fairway); border-width: 1px; }
+.card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 700; }
+
+.when { display: flex; align-items: baseline; gap: 10px; }
+.when .date { font-size: 15px; font-weight: 600; }
+.when .time { font-size: 30px; font-weight: 750; letter-spacing: -0.03em; line-height: 1.1; }
+.when .dow { font-size: 13px; color: var(--muted); }
+
+.meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.meta + .meta { margin-top: 2px; }
+
+.countdown {
+  margin-top: 12px; padding: 9px 12px; border-radius: 8px;
+  background: var(--line-soft); font-size: 13px; font-weight: 600; color: var(--fairway-dk);
+}
+.countdown.urgent { background: var(--flag-soft); color: var(--flag); }
+.countdown.done { background: var(--line-soft); color: var(--muted); }
+
+/* ---------- 버튼 ---------- */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px solid var(--fairway); background: var(--fairway); color: #fff;
+  padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 600;
+  cursor: pointer; text-decoration: none;
+}
+.btn:hover { background: var(--fairway-dk); border-color: var(--fairway-dk); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.ghost { background: #fff; color: var(--fairway); }
+.btn.ghost:hover { background: var(--line-soft); }
+.btn.danger { background: #fff; color: var(--flag); border-color: var(--flag); }
+.btn.danger:hover { background: var(--flag-soft); }
+.btn.wide { width: 100%; padding: 13px; font-size: 15px; }
+.btn.sm { padding: 6px 11px; font-size: 13px; border-radius: 7px; }
+.btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+
+:focus-visible { outline: 2px solid var(--flag); outline-offset: 2px; }
+
+/* ---------- 참가자 / 방 ---------- */
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--line-soft); border-radius: 999px;
+  padding: 4px 11px; font-size: 13px; font-weight: 500;
+}
+.chip.guest { background: var(--guest-soft); color: var(--guest); }
+.chip.master::after { content: "M"; font-size: 10px; font-weight: 700; opacity: .6; }
+.chip button { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 0 0 2px; font-size: 14px; }
+.chip button:hover { color: var(--flag); }
+
+.room {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; margin-bottom: 10px; background: #fff;
+}
+.room-head {
+  background: var(--fairway-dk); color: #fff;
+  padding: 8px 14px; display: flex; align-items: baseline; gap: 8px;
+}
+.room-head .no { font-size: 17px; font-weight: 750; }
+.room-head .cnt { margin-left: auto; font-size: 12px; opacity: .8; }
+.room ol { margin: 0; padding: 8px 14px 12px; list-style: none; }
+.room li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 15px;
+}
+.room li:last-child { border-bottom: 0; }
+.room li .seat { color: var(--muted); font-size: 12px; width: 24px; }
+.room li .tag { margin-left: auto; font-size: 11px; color: var(--guest); background: var(--guest-soft); padding: 2px 8px; border-radius: 999px; }
+.room li.self { font-weight: 700; color: var(--fairway); }
+
+.reveal { animation: deal .35s ease both; }
+.reveal:nth-child(2) { animation-delay: .07s; }
+.reveal:nth-child(3) { animation-delay: .14s; }
+.reveal:nth-child(4) { animation-delay: .21s; }
+@keyframes deal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .reveal { animation: none; } }
+
+/* ---------- 폼 ---------- */
+
+.field { margin-bottom: 12px; }
+.field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+.field input, .field select, .field textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff;
+}
+.field textarea { resize: vertical; line-height: 1.6; }
+.field input:focus, .field select:focus, .field textarea:focus { border-color: var(--fairway); outline: none; }
+.field .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.dow-pick { display: flex; gap: 5px; }
+.dow-pick label {
+  flex: 1; text-align: center; padding: 8px 0; border: 1px solid var(--line);
+  border-radius: 7px; font-size: 13px; cursor: pointer; background: #fff; font-weight: 500;
+}
+.dow-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.dow-pick input:checked + span { color: #fff; }
+.dow-pick label:has(input:checked) { background: var(--fairway); border-color: var(--fairway); color: #fff; }
+
+/* ---------- 참가 의사 ---------- */
+
+.rsvp-wrap { margin-top: 14px; }
+
+.rsvp { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.rsvp button {
+  flex: 1; background: #fff; border: 0; border-right: 1px solid var(--line);
+  padding: 12px 4px; font-size: 15px; font-weight: 600; color: var(--muted); cursor: pointer;
+}
+.rsvp button:last-child { border-right: 0; }
+.rsvp button:hover { background: var(--line-soft); }
+.rsvp button.on { color: #fff; }
+.rsvp button.on.yes { background: var(--fairway); }
+.rsvp button.on.hold { background: var(--guest); }
+.rsvp button.on.no { background: var(--muted); }
+
+.rsvp-state {
+  display: inline-flex; align-items: center; padding: 9px 14px; border-radius: 8px;
+  background: var(--line-soft); font-size: 14px; font-weight: 600; color: var(--muted);
+}
+.rsvp-state.ok { background: #e6efe7; color: var(--fairway); }
+.rsvp-state.wait { background: var(--guest-soft); color: var(--guest); }
+
+.hint.warn {
+  margin-top: 10px; background: var(--guest-soft); color: var(--guest);
+  padding: 9px 12px; border-radius: 8px; font-size: 13px; line-height: 1.5;
+}
+
+.grp { margin-top: 14px; }
+.grp:first-of-type { margin-top: 4px; }
+.grp-h { font-size: 13px; font-weight: 700; color: var(--fairway-dk); margin-bottom: 6px; }
+.grp-h.muted { color: var(--muted); font-weight: 600; }
+
+.chip.st-wait { background: var(--guest-soft); color: var(--guest); }
+.chip.st-hold { background: #f3efe2; color: var(--guest); }
+.chip.st-no { background: var(--line-soft); color: var(--muted); text-decoration: line-through; }
+.chip.st-none { background: #fff; border: 1px dashed var(--line); color: var(--muted); }
+.chip button { font-size: 12px; font-weight: 700; }
+
+/* ---------- 공지 ---------- */
+
+.banner {
+  display: flex; align-items: center; gap: 9px; cursor: pointer;
+  background: #fff; border: 1px solid var(--line); border-left: 3px solid var(--flag);
+  border-radius: var(--radius); padding: 11px 14px; margin-bottom: 10px;
+}
+.banner:hover { background: var(--flag-soft); }
+.banner .t { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pin {
+  flex: none; font-size: 11px; font-weight: 700; color: var(--flag);
+  background: var(--flag-soft); padding: 2px 8px; border-radius: 999px;
+}
+
+.card.notice.pinned { border-left: 3px solid var(--flag); }
+.n-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.n-head h2 { font-size: 16px; }
+.n-body { white-space: pre-wrap; margin-top: 10px; font-size: 14.5px; line-height: 1.65; }
+
+/* ---------- 회원 목록 ---------- */
+
+.mlist { border-top: 1px solid var(--line-soft); }
+.mrow { display: flex; align-items: center; gap: 8px; padding: 11px 0; border-bottom: 1px solid var(--line-soft); }
+.mrow .nm { font-weight: 600; }
+.mrow .sub { font-size: 12px; color: var(--muted); }
+.mrow .acts { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.role-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--line-soft); color: var(--muted); }
+.role-pill.member { background: #e6efe7; color: var(--fairway); }
+.role-pill.master { background: var(--fairway-dk); color: #fff; }
+.role-pill.guest { background: var(--guest-soft); color: var(--guest); }
+
+.empty { text-align: center; color: var(--muted); padding: 34px 12px; font-size: 14px; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 999px;
+  font-size: 14px; z-index: 50; max-width: 88vw; text-align: center;
+}
+.toast.bad { background: var(--flag); }
+
+/* ---------- 로그인 화면 ---------- */
+
+.gate { max-width: 380px; margin: 0 auto; padding: 56px 20px 40px; }
+.gate .mark { font-size: 22px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 4px; }
+.gate .sub { color: var(--muted); font-size: 14px; margin-bottom: 26px; }
+.gate .switch { text-align: center; margin-top: 16px; font-size: 14px; }
+.gate .switch button { background: none; border: 0; color: var(--fairway); font-weight: 600; cursor: pointer; text-decoration: underline; }
