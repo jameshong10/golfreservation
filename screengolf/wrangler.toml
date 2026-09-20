@@ -2,15 +2,6 @@ name = "screengolf"
 compatibility_date = "2025-06-01"
 pages_build_output_dir = "public"
 
-# D1 데이터베이스 연결
-[[d1_databases]]
-binding = "DB"
-database_name = "screengolf"
-name = "screengolf"
-compatibility_date = "2025-06-01"
-pages_build_output_dir = "public"
-
-# D1 데이터베이스 연결
 [[d1_databases]]
 binding = "DB"
 database_name = "screengolf"
