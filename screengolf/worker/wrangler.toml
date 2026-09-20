@@ -2,19 +2,9 @@ name = "screengolf-cron"
 main = "src/index.js"
 compatibility_date = "2025-06-01"
 
-# 1분마다 실행 (UTC 기준으로 돌지만, 배정 판단은 코드가 한국시간으로 계산합니다)
 [triggers]
 crons = ["* * * * *"]
 
-# 반드시 Pages와 같은 D1 데이터베이스를 연결해야 합니다.
-[[d1_databases]]
-binding = "DB"
-database_name = "screengolf"
-name = "screengolf"
-compatibility_date = "2025-06-01"
-pages_build_output_dir = "public"
-
-# D1 데이터베이스 연결
 [[d1_databases]]
 binding = "DB"
 database_name = "screengolf"
