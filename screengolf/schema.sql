@@ -10,8 +10,11 @@ CREATE TABLE IF NOT EXISTS members (
   role       TEXT    NOT NULL DEFAULT 'guest',    -- master | member | guest
   status     TEXT    NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
   memo       TEXT,
+  nickname   TEXT,                            -- 동호회 닉네임 = 골프존 닉네임 (본인이 자유롭게 변경)
+  gz_mask    TEXT,                            -- 골프존 결과화면의 가려진 아이디 (예: giveufi**) — 결과 저장 시 자동 기록
   created_at TEXT    NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_members_nickname ON members(nickname);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT    PRIMARY KEY,
@@ -32,6 +35,9 @@ CREATE TABLE IF NOT EXISTS events (
   spread_guests INTEGER NOT NULL DEFAULT 1,-- 1이면 게스트를 방마다 고르게 분산
   assigned_at TEXT,                        -- 방 배정 완료 시각 (ISO)
   closed      INTEGER NOT NULL DEFAULT 0,  -- 1이면 신청 마감
+  entry_fee   INTEGER NOT NULL DEFAULT 4000, -- 1인 참가비
+  prize_json  TEXT,                        -- 방배정 때 뽑은 시상 금액 {n, fee, amounts[], drawn_at}
+  results_at  TEXT,                        -- 대회 결과 저장 시각
   created_at  TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date);
@@ -73,3 +79,31 @@ CREATE TABLE IF NOT EXISTS room_members (
   seq       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_room_members_room ON room_members(room_id);
+
+-- 예전 닉네임 / 골프존 결과에 찍혔던 닉네임 (사진 인식 때 같은 사람으로 찾기 위해)
+CREATE TABLE IF NOT EXISTS member_aliases (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id  INTEGER NOT NULL,
+  alias      TEXT    NOT NULL,
+  created_at TEXT    NOT NULL,
+  UNIQUE(member_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_alias ON member_aliases(alias);
+
+-- 대회 결과 (골프존 스트로크 결과표)
+CREATE TABLE IF NOT EXISTS results (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id   INTEGER NOT NULL,
+  member_id  INTEGER,                 -- 비회원이면 NULL
+  raw_nick   TEXT,                    -- 결과표에 찍힌 닉네임 그대로
+  gz_mask    TEXT,                    -- 결과표에 찍힌 가려진 골프존 아이디
+  rank_no    INTEGER NOT NULL,
+  rank_label TEXT,                    -- "3", "T6"
+  stroke     INTEGER NOT NULL,        -- 스트로크
+  handicap   INTEGER NOT NULL DEFAULT 0, -- 보정치
+  final      INTEGER NOT NULL,        -- 최종성적
+  prize      INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_results_event ON results(event_id);
+CREATE INDEX IF NOT EXISTS idx_results_member ON results(member_id);

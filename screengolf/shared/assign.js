@@ -3,6 +3,8 @@
 export const ROOM_MAX = 4; // 한 방 최대 인원
 export const MAX_ROOMS = 6; // 구장에 있는 방 수 (1~6번 방)
 export const ASSIGN_LEAD_MIN = 20; // 시작 몇 분 전에 배정할지
+export const ENTRY_FEE = 4000; // 1인 참가비 (원)
+export const PRIZE_UNIT = 1000; // 상금 단위 (원)
 
 // 신청 상태
 //  yes  : 참가 확정
@@ -75,6 +77,99 @@ export function buildRooms(participants, spreadGuests) {
   return rooms;
 }
 
+/* ---------------- 시상 ---------------- */
+
+/** 시상 인원: 참가자의 절반(내림). 7명 → 3명, 10명 → 5명. 1명이면 1명 */
+export const winnersOf = (n) => (n <= 0 ? 0 : Math.max(1, Math.floor(n / 2)));
+
+const rand01 = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
+
+/**
+ * 참가비 총액을 1등이 가장 많고 아래로 갈수록 적게, 랜덤으로 나눈다.
+ *  - 1,000원 단위, 합계 = 인원 x 참가비
+ *  - 입상자는 최소 참가비 + 1,000원은 받는다
+ *  - 가능한 한 모든 순위가 서로 다른 금액(1등 > 2등 > 3등 ...)
+ * 예) 7명 28,000원 → [13000, 8000, 7000] 같은 식
+ */
+export function drawPrizes(n, fee = ENTRY_FEE, rnd = rand01) {
+  const k = winnersOf(n);
+  if (!k) return [];
+  const total = Math.round((n * fee) / PRIZE_UNIT);
+  if (k === 1) return [total * PRIZE_UNIT];
+
+  // 입상자는 최소 참가비 + 1,000원 (입상했는데 본전이면 서운하니까)
+  const min = Math.max(1, Math.floor(fee / PRIZE_UNIT) + 1);
+  const a = Array(k).fill(min);
+  let rest = total - min * k;
+
+  // 계단: 위 순위부터 1단위씩 차등 (가능한 만큼)
+  let t = 0;
+  while (t + 1 <= k - 1 && ((t + 1) * (t + 2)) / 2 <= rest) t++;
+  for (let i = 0; i < t; i++) a[i] += t - i;
+  rest -= (t * (t + 1)) / 2;
+
+  // 남은 금액은 위 순위일수록 확률이 높게 랜덤 분배
+  const w = a.map((_, i) => Math.pow(k - i, 2.2) * (0.6 + rnd() * 0.8));
+  const wsum = w.reduce((x, y) => x + y, 0);
+  while (rest > 0) {
+    let r = rnd() * wsum;
+    let i = 0;
+    while (i < k - 1 && r >= w[i]) r -= w[i++];
+    // 순서가 뒤집히지 않도록: 받을 수 없으면 한 계단 위로
+    while (i > 0 && (i <= t ? a[i] + 1 >= a[i - 1] : a[i] + 1 > a[i - 1])) i--;
+    a[i]++;
+    rest--;
+  }
+  return a.map((x) => x * PRIZE_UNIT);
+}
+
+/** "T6" · "6" · "6위" → 6 */
+export function parseRank(label) {
+  const m = String(label == null ? "" : label).match(/\d+/);
+  return m ? Number(m[0]) : null;
+}
+
+/**
+ * 결과 행에 순위와 상금을 붙인다.
+ * rows: [{final, rank_label?}]  plan: [1등금액, 2등금액, ...]
+ * 공동 순위는 해당 자리들의 상금을 합쳐 똑같이 나눈다 (100원 미만 버림).
+ */
+export function rankAndPrize(rows, plan) {
+  const list = rows.map((r) => ({ ...r }));
+  // 순위가 비어 있으면 최종성적으로 계산 (같은 점수는 공동)
+  const needCalc = list.some((r) => parseRank(r.rank_label) == null);
+  if (needCalc) {
+    const sorted = [...list].sort((x, y) => x.final - y.final);
+    sorted.forEach((r, i) => {
+      r.rank_no = i > 0 && sorted[i - 1].final === r.final ? sorted[i - 1].rank_no : i + 1;
+    });
+  } else {
+    list.forEach((r) => (r.rank_no = parseRank(r.rank_label)));
+  }
+  list.sort((x, y) => x.rank_no - y.rank_no || x.final - y.final);
+
+  const groups = {};
+  list.forEach((r) => (groups[r.rank_no] = (groups[r.rank_no] || 0) + 1));
+  let pos = 0;
+  let leftover = 0;
+  const seen = new Set();
+  for (const r of list) {
+    if (seen.has(r.rank_no)) continue;
+    seen.add(r.rank_no);
+    const cnt = groups[r.rank_no];
+    let sum = 0;
+    for (let j = pos; j < pos + cnt; j++) sum += plan[j] || 0;
+    const each = Math.floor(sum / cnt / 100) * 100;
+    leftover += sum - each * cnt;
+    list.filter((x) => x.rank_no === r.rank_no).forEach((x) => {
+      x.prize = each;
+      x.rank_label = cnt > 1 ? `T${r.rank_no}` : String(r.rank_no);
+    });
+    pos += cnt;
+  }
+  return { rows: list, leftover };
+}
+
 /** 확정 참가(yes) 인원 수 */
 export async function yesCount(env, eventId) {
   const r = await env.DB.prepare(`SELECT COUNT(*) AS c FROM signups WHERE event_id = ? AND status = 'yes'`)
@@ -90,7 +185,8 @@ export async function clearRooms(env, eventId, alsoResetFlag = false) {
     env.DB.prepare(`DELETE FROM room_members WHERE room_id = ?`).bind(r.id)
   );
   stmts.push(env.DB.prepare(`DELETE FROM rooms WHERE event_id = ?`).bind(eventId));
-  if (alsoResetFlag) stmts.push(env.DB.prepare(`UPDATE events SET assigned_at = NULL WHERE id = ?`).bind(eventId));
+  if (alsoResetFlag)
+    stmts.push(env.DB.prepare(`UPDATE events SET assigned_at = NULL, prize_json = NULL WHERE id = ?`).bind(eventId));
   await env.DB.batch(stmts);
 }
 
@@ -123,6 +219,11 @@ export async function maybeAssign(env, ev, force = false) {
   await clearRooms(env, ev.id);
 
   const rooms = buildRooms(parts || [], !!ev.spread_guests);
+
+  // 방이 정해질 때 시상 금액도 함께 랜덤 배정
+  const fee = Number(ev.entry_fee) || ENTRY_FEE;
+  const plan = { n: (parts || []).length, fee, amounts: drawPrizes((parts || []).length, fee), drawn_at: nowISO() };
+  await env.DB.prepare(`UPDATE events SET prize_json = ? WHERE id = ?`).bind(JSON.stringify(plan), ev.id).run();
   for (let i = 0; i < rooms.length; i++) {
     const res = await env.DB.prepare(`INSERT INTO rooms (event_id, room_no) VALUES (?, ?)`)
       .bind(ev.id, i + 1)

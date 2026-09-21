@@ -40,13 +40,13 @@ const kst = (min = 0) => new Date(Date.now() + 9 * 3600000 + min * 60000).toISOS
 const dateOf = (s) => s.slice(0, 10), timeOf = (s) => s.slice(11, 16);
 
 /* 1. 마스터 + 회원 8명 */
-let r = await call("/api/register", "POST", { login_id: "master", name: "홍마스터", password: "1234" });
+let r = await call("/api/register", "POST", { login_id: "master", name: "홍마스터", nickname: "홍그리골프", password: "1234" });
 ok(r.first, "첫 가입자가 마스터");
 TOKEN = (await call("/api/login", "POST", { login_id: "master", password: "1234" })).token;
 
 for (let i = 1; i <= 8; i++) {
   const t = TOKEN; TOKEN = "";
-  await call("/api/register", "POST", { login_id: "u" + i, name: "회원" + i, password: "1234" });
+  await call("/api/register", "POST", { login_id: "u" + i, name: "회원" + i, nickname: "닉" + i, password: "1234" });
   TOKEN = t;
 }
 const pend = (await call("/api/members")).members.filter((m) => m.status === "pending");
@@ -170,5 +170,90 @@ ok(JSON.stringify(sch.roomSizes(7)) === "[4,3]", "7명 → 4+3");
 ok(JSON.stringify(sch.roomSizes(5)) === "[3,2]", "5명 → 3+2");
 ok(sch.roomSizes(24).length === 6, "24명 → 방 6개");
 ok(sch.roomSizes(26).length === 6, "정원을 넘겨도 방은 6개까지만");
+
+
+/* 11. 방배정과 함께 시상 금액 배정 */
+ok(ev.prize && ev.prize.n === ev.yes_count, `방배정 때 시상 계획 생성 (${ev.prize && ev.prize.amounts.join("/")})`);
+ok(ev.prize.amounts.reduce((a, b) => a + b, 0) === ev.yes_count * 4000, "시상 총액 = 인원 x 4,000원");
+ok(ev.prize.amounts.length === Math.floor(ev.yes_count / 2), "참가자 절반(내림)만 시상");
+ok(ev.prize.amounts.every((x, i) => i === 0 || x < ev.prize.amounts[i - 1]), "1등 > 2등 > 3등 ... 차등");
+for (let n = 1; n <= 30; n++) for (let t = 0; t < 50; t++) {
+  const p = sch.drawPrizes(n);
+  if (p.reduce((a, b) => a + b, 0) !== n * 4000 || p.some((x, i) => i && x > p[i - 1]) || p.length !== Math.max(1, Math.floor(n / 2)) || (p.length > 1 && p.some((x) => x < 5000)))
+    ok(false, `시상 규칙 위반 n=${n} ${p}`);
+}
+ok(true, "1~30명 x 50회 랜덤 시상 모두 규칙 충족");
+
+/* 12. 닉네임 */
+try { await call("/api/me", "PATCH", { nickname: "닉1" }); ok(false, "중복 닉네임 거부"); }
+catch (e) { ok(/다른 회원/.test(e.message), "다른 회원 닉네임으로는 못 바꿈"); }
+{
+  const t = TOKEN;
+  TOKEN = (await call("/api/login", "POST", { login_id: "u1", password: "1234" })).token;
+  r = await call("/api/me", "PATCH", { nickname: "스마일맨.준" });
+  ok(r.me.nickname === "스마일맨.준", "본인이 닉네임 변경 (닉1 → 스마일맨.준)");
+  TOKEN = t;
+}
+
+/* 13. 결과 저장 · 예전 닉네임/골프존ID로 매칭 · 공동순위 상금 */
+const u1 = (await call("/api/members")).members.find((m) => m.login_id === "u1");
+const u2 = (await call("/api/members")).members.find((m) => m.login_id === "u2");
+const u3 = (await call("/api/members")).members.find((m) => m.login_id === "u3");
+const masterM = (await call("/api/members")).members.find((m) => m.login_id === "master");
+await call(`/api/events/${evId}/prize`, "POST", { count: 7 });
+ev = (await call("/api/events/" + evId)).event;
+const plan = ev.prize.amounts;
+r = await call(`/api/events/${evId}/results`, "PUT", { rows: [
+  { member_id: masterM.id, raw_nick: "홍그리골프", gz_mask: "giveufi**", rank_label: "3", stroke: 6, handicap: 1, final: 7 },
+  { member_id: u1.id, raw_nick: "스마일맨.준", gz_mask: "wns10**", rank_label: "1", stroke: 3, handicap: -1, final: 2 },
+  { member_id: u2.id, raw_nick: "해피라구~~", gz_mask: "hm85141**", rank_label: "2", stroke: 2, handicap: 1, final: 3 },
+  { member_id: u3.id, raw_nick: "무산2", gz_mask: "cyh90**", rank_label: "4", stroke: 8, handicap: 3, final: 11 },
+  { member_id: null, raw_nick: "월산.", rank_label: "T5", stroke: 10, handicap: 2, final: 12 },
+  { member_id: null, raw_nick: "홀컵속그로", rank_label: "T5", stroke: 14, handicap: -2, final: 12 },
+  { member_id: null, raw_nick: "윤프로", rank_label: "7", stroke: 24, handicap: -2, final: 22 },
+]});
+const res1 = r.event.results;
+ok(res1[0].member_id === u1.id && res1[0].prize === plan[0], `1등 상금 ${res1[0].prize}`);
+ok(res1[2].prize === plan[2] && res1[3].prize === 0, "3등까지만 상금, 4등부터 0");
+ok(res1.filter((x) => x.rank_label === "T5").length === 2, "공동 순위 T5 유지");
+
+// u2가 닉네임을 바꾼 뒤, 사진 인식 결과(가짜 Claude 응답)로 매칭 확인
+{
+  const t = TOKEN;
+  TOKEN = (await call("/api/login", "POST", { login_id: "u2", password: "1234" })).token;
+  await call("/api/me", "PATCH", { nickname: "해피라구2" });
+  TOKEN = t;
+}
+env.GEMINI_API_KEY = "AQ.test";
+const fake = { title: "주오맨0920", date: "26.09.20", rows: [
+  { rank: "3", nickname: "홍그리골프", gz_id: "giveufi**", stroke: 6, handicap: 1, final: 7 },
+  { rank: "1", nickname: "스마일맨.준", gz_id: "wns10**", stroke: 3, handicap: -1, final: 2 },
+  { rank: "2", nickname: "해피라구~~", gz_id: "hm85141**", stroke: 2, handicap: 1, final: 3 },
+  { rank: "3", nickname: "홍그리골프", gz_id: "giveufi**", stroke: 6, handicap: 1, final: 7 },
+  { rank: "5", nickname: "무산새닉", gz_id: "cyh90**", stroke: 8, handicap: 3, final: 11 },
+  { rank: "9", nickname: "모르는사람", gz_id: "zzz**", stroke: 18, handicap: 0, final: 18 },
+]};
+const realFetch = globalThis.fetch;
+const hit = [];
+globalThis.fetch = async (url) => {
+  hit.push(String(url).match(/models\/([^:]+)/)[1]);
+  // 첫 모델은 없다(404)고 가정 → 다음 모델로 넘어가는지 확인
+  if (hit.length === 1) return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+  return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(fake) }] } }] }), { status: 200 });
+};
+r = await call(`/api/events/${evId}/ocr`, "POST", { images: [{ media_type: "image/jpeg", data: "AAAA" }] });
+globalThis.fetch = realFetch;
+ok(hit.length === 2 && hit[1] === "gemini-3.5-flash", `Gemini: 모델이 없으면 다음 모델로 (${hit.join(" → ")})`);
+const byNick = Object.fromEntries(r.rows.map((x) => [x.nickname, x]));
+ok(r.rows.length === 5, "겹친 캡처의 중복 행 제거 (6 → 5)");
+ok(byNick["홍그리골프"].member_id === masterM.id && byNick["홍그리골프"].match === "닉네임", "현재 닉네임으로 매칭");
+ok(byNick["해피라구~~"].member_id === u2.id && byNick["해피라구~~"].match === "예전 닉네임", "닉네임 바꾼 회원 → 예전 닉네임으로 매칭");
+ok(byNick["무산새닉"].member_id === u3.id && byNick["무산새닉"].match === "골프존 ID", "처음 보는 닉네임 → 골프존 ID로 매칭");
+ok(byNick["모르는사람"].member_id === null, "모르는 사람은 연결 안 됨 (마스터가 선택)");
+
+/* 14. 기록 */
+const st = await call("/api/stats");
+ok(st.events.length === 1 && st.results.length === 7, "기록: 대회 1건, 결과 7줄");
+ok(st.results.filter((x) => x.member_id).length === 4, "회원 4명 · 비회원 3명");
 
 console.log("\n모든 테스트 통과");
