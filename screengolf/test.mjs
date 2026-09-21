@@ -256,4 +256,55 @@ const st = await call("/api/stats");
 ok(st.events.length === 1 && st.results.length === 7, "기록: 대회 1건, 결과 7줄");
 ok(st.results.filter((x) => x.member_id).length === 4, "회원 4명 · 비회원 3명");
 
+/* 15. 오인식 수정: 같은 결과표 닉네임을 다른 회원으로 고쳐 저장하면 잘못된 연결이 옮겨감 */
+const u4 = (await call("/api/members")).members.find((m) => m.login_id === "u4");
+r = await call(`/api/events/${evId}/results`, "PUT", { rows: [
+  { member_id: u4.id, raw_nick: "무산2", gz_mask: "cyh90**", rank_label: "", stroke: 8, handicap: 3, final: 11 },
+  { member_id: masterM.id, raw_nick: "홍그리골프", gz_mask: "giveufi**", rank_label: "", stroke: 6, handicap: 1, final: 7 },
+]});
+let mm = (await call("/api/members")).members;
+ok(mm.find((m) => m.id === u4.id).gz_mask === "cyh90**" && mm.find((m) => m.id === u3.id).gz_mask === null, "골프존 ID가 올바른 회원으로 옮겨짐");
+const al3 = (await call(`/api/members/${u3.id}/aliases`)).aliases.map((a) => a.alias);
+ok(!al3.includes("무산2"), "잘못 붙은 인식 이름이 이전 회원에게서 제거됨");
+await call(`/api/members/${u4.id}`, "PATCH", { gz_mask: "fixed**" });
+ok((await call("/api/members")).members.find((m) => m.id === u4.id).gz_mask === "fixed**", "마스터가 골프존 ID 직접 수정");
+const al4 = (await call(`/api/members/${u4.id}/aliases`)).aliases;
+await call(`/api/members/${u4.id}/aliases/${al4[0].id}`, "DELETE", {});
+ok((await call(`/api/members/${u4.id}/aliases`)).aliases.length === al4.length - 1, "마스터가 인식 이름 삭제");
+
+/* 16. 개발자 등급 + 테스트 데이터 생성 · 삭제 */
+try { await call("/api/test-data", "POST", { events: 1 }); ok(false, "마스터는 테스트 도구 불가"); }
+catch (e) { ok(/개발자/.test(e.message), "테스트 도구는 개발자 계정만"); }
+// 두 번째 마스터를 만든 뒤 본인을 개발자로
+await call(`/api/members/${u1.id}`, "PATCH", { role: "master" });
+await call(`/api/members/${masterM.id}`, "PATCH", { role: "dev" });
+ok((await call("/api/me")).me.role === "dev", "본인 등급을 개발자로 변경");
+try { await call(`/api/members/${u1.id}`, "DELETE", {}); ok(false, "마스터 삭제 거부"); }
+catch (e) { ok(/마스터·개발자/.test(e.message), "마스터 계정은 삭제 불가"); }
+const before = (await call("/api/members")).members.length;
+r = await call("/api/test-data", "POST", { events: 8, upcoming: true });
+ok(r.accounts === 20 && r.events === 8 && r.upcoming, `테스트 계정 20명 · 대회 8회 · 배정 테스트 일정 ${r.upcoming}`);
+const st2 = await call("/api/stats");
+const testRes = st2.results.filter((x) => st2.events.find((e) => e.id === x.event_id && e.place === undefined) || true);
+ok(st2.events.length >= 9, `기록 탭에 대회 ${st2.events.length}건`);
+const byEv = {};
+for (const x of st2.results) (byEv[x.event_id] = byEv[x.event_id] || []).push(x);
+const okEv = Object.values(byEv).every((l) => l.length === 2 || (l.length >= 6 && l.length <= 14 && l.some((x) => x.prize > 0)));
+ok(okEv, "대회마다 6~14명 참가 · 상금 배정");
+const up = (await call("/api/events")).events.find((e) => e.title === "방배정 테스트");
+ok(up && up.yes_count === 10, "방배정 테스트 일정에 10명 참가");
+r = await call("/api/test-data", "POST", { events: 2, upcoming: false });
+ok(r.accounts === 20, "다시 만들어도 계정은 20명 그대로(중복 없음)");
+// 선택 삭제
+const tests = (await call("/api/members")).members.filter((m) => m.is_test).slice(0, 3).map((m) => m.id);
+r = await call("/api/members-delete", "POST", { ids: [...tests, masterM.id] });
+ok(r.deleted === 3, "선택 삭제 3명 (본인은 제외)");
+try { await call("/api/members-delete", "POST", { ids: [u1.id] }); ok(false, "마스터 선택 삭제 거부"); }
+catch (e) { ok(true, "선택 삭제에 마스터 포함 시 거부"); }
+try { await call("/api/members-delete", "POST", { ids: [masterM.id] }); ok(false, "본인 삭제 거부"); } catch (e) { ok(true, "본인만 고르면 삭제 거부"); }
+r = await call("/api/test-data", "DELETE", {});
+ok(r.accounts === 17 && r.events === 11, `테스트 데이터 전부 삭제 (계정 ${r.accounts}, 대회 ${r.events})`);
+ok((await call("/api/members")).members.length === before, "실제 회원 수는 그대로");
+ok((await call("/api/stats")).events.length === 1, "실제 대회 기록은 그대로");
+
 console.log("\n모든 테스트 통과");

@@ -3,6 +3,7 @@
 
 import {
   ENTRY_FEE,
+  shuffle,
   MAX_ROOMS,
   drawPrizes,
   rankAndPrize,
@@ -76,6 +77,8 @@ const publicMember = (m) => ({
   name: m.name,
   nickname: m.nickname || null,
   gz_mask: m.gz_mask || null,
+  is_test: m.memo === TEST_MARK,
+  activity: m.activity == null ? undefined : m.activity, // 참가신청 + 결과 기록 수 (마스터용)
   phone: m.phone,
   role: m.role,
   status: m.status,
@@ -84,6 +87,144 @@ const publicMember = (m) => ({
 });
 
 /* ---------------- 닉네임 ---------------- */
+
+const TEST_MARK = "__TEST__"; // 테스트 계정·대회 표시
+
+/** 회원 한 명 완전 삭제 (지난 결과는 '비회원'으로 남김) */
+function deleteMemberStmts(env, id) {
+  return [
+    env.DB.prepare(`DELETE FROM room_members WHERE member_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM signups WHERE member_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM sessions WHERE member_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM member_aliases WHERE member_id = ?`).bind(id),
+    env.DB.prepare(`UPDATE results SET member_id = NULL WHERE member_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM members WHERE id = ?`).bind(id),
+  ];
+}
+
+/** 일정 한 건 완전 삭제 */
+async function deleteEventStmts(env, id) {
+  const { results } = await env.DB.prepare(`SELECT id FROM rooms WHERE event_id = ?`).bind(id).all();
+  return [
+    ...(results || []).map((r) => env.DB.prepare(`DELETE FROM room_members WHERE room_id = ?`).bind(r.id)),
+    env.DB.prepare(`DELETE FROM rooms WHERE event_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM signups WHERE event_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM results WHERE event_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM events WHERE id = ?`).bind(id),
+  ];
+}
+
+/* ---------------- 테스트 데이터 ---------------- */
+
+const rint = (a, b) => a + Math.floor((crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296) * (b - a + 1));
+
+/** 테스트1~테스트20 계정 + 지난 대회 기록(랜덤 스코어) 생성 */
+async function makeTestData(env, eventCount, withUpcoming) {
+  const now = nowISO();
+  // 비밀번호 1234 — 계정마다 같은 해시를 써서 서버 부담을 줄임
+  const salt = randomHex(16);
+  const hash = await hashPw("1234", salt);
+
+  const ins = [];
+  for (let i = 1; i <= 20; i++) {
+    ins.push(
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO members (login_id, name, nickname, gz_mask, pw_hash, pw_salt, role, status, memo, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'member', 'approved', ?, ?)`
+      ).bind(`test${i}`, `테스트${i}`, `테스트${i}`, `test${i}**`, hash, salt, TEST_MARK, now)
+    );
+  }
+  await env.DB.batch(ins);
+  const { results: people } = await env.DB.prepare(`SELECT id FROM members WHERE memo = ?`).bind(TEST_MARK).all();
+
+  // 사람마다 실력(평균 스트로크)과 보정치를 정해두고, 대회마다 컨디션 차이를 준다
+  const skill = new Map(people.map((p) => [p.id, { base: rint(0, 16), hc: rint(-2, 3) }]));
+
+  let made = 0;
+  for (let k = 1; k <= eventCount; k++) {
+    const date = todayKST(-7 * k);
+    const ev = await env.DB.prepare(
+      `INSERT INTO events (event_date, start_time, title, place, note, rooms_count, entry_fee, assigned_at, results_at, created_at)
+       VALUES (?, '19:00', ?, '테스트 구장', ?, 6, 4000, ?, ?, ?)`
+    )
+      .bind(date, `테스트 대회 ${eventCount - k + 1}`, TEST_MARK, now, now, now)
+      .run();
+    const evId = ev.meta.last_row_id;
+
+    const players = shuffle(people).slice(0, rint(6, 14));
+    const rows = players.map((p) => {
+      const s = skill.get(p.id);
+      let stroke = s.base + rint(-4, 4);
+      if (rint(1, 10) === 1) stroke += rint(3, 7); // 가끔 무너지는 날
+      const handicap = Math.max(-3, Math.min(4, s.hc + rint(-1, 1)));
+      return { member_id: p.id, raw_nick: null, gz_mask: null, rank_label: "", stroke, handicap, final: stroke + handicap };
+    });
+    const amounts = drawPrizes(rows.length, 4000);
+    const ranked = rankAndPrize(rows, amounts).rows;
+
+    const st = [
+      env.DB.prepare(`UPDATE events SET prize_json = ? WHERE id = ?`).bind(
+        JSON.stringify({ n: rows.length, fee: 4000, amounts, drawn_at: now }),
+        evId
+      ),
+    ];
+    for (const r of ranked) {
+      st.push(
+        env.DB.prepare(
+          `INSERT INTO results (event_id, member_id, raw_nick, gz_mask, rank_no, rank_label, stroke, handicap, final, prize, created_at)
+           SELECT ?, id, nickname, gz_mask, ?, ?, ?, ?, ?, ?, ? FROM members WHERE id = ?`
+        ).bind(evId, r.rank_no, r.rank_label, r.stroke, r.handicap, r.final, r.prize, now, r.member_id),
+        env.DB.prepare(`INSERT INTO signups (event_id, member_id, status, created_at, updated_at) VALUES (?, ?, 'yes', ?, ?)`).bind(
+          evId,
+          r.member_id,
+          now,
+          now
+        )
+      );
+    }
+    await env.DB.batch(st);
+    made++;
+  }
+
+  // 방배정 테스트용: 30분 뒤 시작하는 일정 + 테스트 계정 10명 참가
+  let upcoming = null;
+  if (withUpcoming) {
+    const t = new Date(Date.now() + 9 * 3600000 + 30 * 60000);
+    t.setUTCMinutes(Math.ceil(t.getUTCMinutes() / 5) * 5, 0, 0);
+    const iso = t.toISOString();
+    const ev = await env.DB.prepare(
+      `INSERT INTO events (event_date, start_time, title, place, note, rooms_count, entry_fee, created_at)
+       VALUES (?, ?, '방배정 테스트', '테스트 구장', ?, 6, 4000, ?)`
+    )
+      .bind(iso.slice(0, 10), iso.slice(11, 16), TEST_MARK, now)
+      .run();
+    const evId = ev.meta.last_row_id;
+    await env.DB.batch(
+      shuffle(people)
+        .slice(0, 10)
+        .map((p) =>
+          env.DB.prepare(`INSERT INTO signups (event_id, member_id, status, created_at, updated_at) VALUES (?, ?, 'yes', ?, ?)`).bind(
+            evId,
+            p.id,
+            now,
+            now
+          )
+        )
+    );
+    upcoming = `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+  }
+  return { accounts: people.length, events: made, upcoming };
+}
+
+async function clearTestData(env) {
+  const { results: evs } = await env.DB.prepare(`SELECT id FROM events WHERE note = ?`).bind(TEST_MARK).all();
+  const { results: mem } = await env.DB.prepare(`SELECT id FROM members WHERE memo = ?`).bind(TEST_MARK).all();
+  const st = [];
+  for (const e of evs || []) st.push(...(await deleteEventStmts(env, e.id)));
+  for (const m of mem || []) st.push(...deleteMemberStmts(env, m.id));
+  if (st.length) await env.DB.batch(st);
+  return { events: (evs || []).length, accounts: (mem || []).length };
+}
 
 const norm = (s) => String(s == null ? "" : s).normalize("NFC").replace(/\s+/g, "").toLowerCase();
 
@@ -454,7 +595,9 @@ async function handle(request, env) {
   }
 
   if (!me) return fail("로그인이 필요합니다.", 401);
-  const isMaster = me.role === "master";
+  // 개발자(dev)는 마스터 권한 전부 + 테스트 도구
+  const isMaster = me.role === "master" || me.role === "dev";
+  const isDev = me.role === "dev";
 
   if (seg[0] === "me" && seg.length === 1 && method === "GET") return json({ me: publicMember(me) });
 
@@ -532,13 +675,22 @@ async function handle(request, env) {
 
   if (seg[0] === "members" && seg.length === 1 && method === "GET") {
     const { results } = await env.DB.prepare(
-      `SELECT * FROM members ORDER BY
+      `SELECT m.*,
+        (SELECT COUNT(*) FROM signups s WHERE s.member_id = m.id) +
+        (SELECT COUNT(*) FROM results r WHERE r.member_id = m.id) AS activity
+       FROM members m ORDER BY
         CASE status WHEN 'pending' THEN 0 ELSE 1 END,
-        CASE role WHEN 'master' THEN 0 WHEN 'member' THEN 1 ELSE 2 END,
+        CASE role WHEN 'master' THEN 0 WHEN 'dev' THEN 1 WHEN 'member' THEN 2 ELSE 3 END,
         name`
     ).all();
     const list = (results || []).filter((m) => isMaster || m.status === "approved");
-    return json({ members: list.map(publicMember) });
+    return json({
+      members: list.map((m) => {
+        const p = publicMember(m);
+        if (!isMaster) delete p.activity;
+        return p;
+      }),
+    });
   }
 
   if (seg[0] === "members" && seg[1] && method === "PATCH") {
@@ -556,7 +708,7 @@ async function handle(request, env) {
 
     const fields = [];
     const vals = [];
-    if (body.role && ["master", "member", "guest"].includes(body.role)) {
+    if (body.role && ["master", "dev", "member", "guest"].includes(body.role)) {
       if (target.role === "master" && body.role !== "master") {
         const c = await env.DB.prepare(
           `SELECT COUNT(*) AS c FROM members WHERE role='master' AND status='approved'`
@@ -569,6 +721,12 @@ async function handle(request, env) {
     if (body.status && ["pending", "approved", "rejected"].includes(body.status)) {
       fields.push("status = ?");
       vals.push(body.status);
+    }
+    if ("gz_mask" in body) {
+      const g = String(body.gz_mask || "").trim() || null;
+      if (g) await env.DB.prepare(`UPDATE members SET gz_mask = NULL WHERE gz_mask = ? AND id <> ?`).bind(g, id).run();
+      fields.push("gz_mask = ?");
+      vals.push(g);
     }
     for (const k of ["name", "phone", "memo"]) {
       if (k in body) {
@@ -594,15 +752,57 @@ async function handle(request, env) {
     if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
     const id = Number(seg[1]);
     if (id === me.id) return fail("본인 계정은 삭제할 수 없습니다.");
-    await env.DB.batch([
-      env.DB.prepare(`DELETE FROM room_members WHERE member_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM signups WHERE member_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM sessions WHERE member_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM member_aliases WHERE member_id = ?`).bind(id),
-      env.DB.prepare(`UPDATE results SET member_id = NULL WHERE member_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM members WHERE id = ?`).bind(id),
-    ]);
+    const t = await env.DB.prepare(`SELECT role FROM members WHERE id = ?`).bind(id).first();
+    if (t && (t.role === "master" || t.role === "dev")) return fail("마스터·개발자 계정은 먼저 등급을 바꾼 뒤 삭제하세요.");
+    await env.DB.batch(deleteMemberStmts(env, id));
     return json({ ok: true });
+  }
+
+  // 여러 계정 한 번에 삭제
+  if (seg[0] === "members-delete" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const ids = [...new Set((Array.isArray(body.ids) ? body.ids : []).map(Number))].filter((x) => x && x !== me.id);
+    if (!ids.length) return fail("삭제할 계정을 고르세요.");
+    const { results: masters } = await env.DB.prepare(
+      `SELECT id FROM members WHERE role IN ('master', 'dev') AND id IN (${ids.map(() => "?").join(",")})`
+    )
+      .bind(...ids)
+      .all();
+    if (masters && masters.length) return fail("마스터·개발자 계정은 먼저 등급을 바꾼 뒤 삭제하세요.");
+    await env.DB.batch(ids.flatMap((id) => deleteMemberStmts(env, id)));
+    return json({ ok: true, deleted: ids.length });
+  }
+
+  // 사진 인식용 정보 (예전 닉네임 · 결과표 닉네임 · 골프존 ID)
+  if (seg[0] === "members" && seg[1] && seg[2] === "aliases" && method === "GET") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const { results } = await env.DB.prepare(
+      `SELECT id, alias, created_at FROM member_aliases WHERE member_id = ? ORDER BY created_at DESC`
+    )
+      .bind(Number(seg[1]))
+      .all();
+    return json({ aliases: results || [] });
+  }
+
+  if (seg[0] === "members" && seg[1] && seg[2] === "aliases" && seg[3] && method === "DELETE") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    await env.DB.prepare(`DELETE FROM member_aliases WHERE id = ? AND member_id = ?`)
+      .bind(Number(seg[3]), Number(seg[1]))
+      .run();
+    return json({ ok: true });
+  }
+
+  /* ---- 테스트 데이터 ---- */
+
+  if (seg[0] === "test-data" && method === "POST") {
+    if (!isDev) return fail("개발자 계정만 할 수 있습니다.", 403);
+    const n = Math.min(Math.max(Number(body.events) || 8, 0), 20);
+    return json(await makeTestData(env, n, body.upcoming !== false));
+  }
+
+  if (seg[0] === "test-data" && method === "DELETE") {
+    if (!isDev) return fail("개발자 계정만 할 수 있습니다.", 403);
+    return json(await clearTestData(env));
   }
 
   /* ---- 일정 ---- */
@@ -707,12 +907,7 @@ async function handle(request, env) {
   if (seg[0] === "events" && seg[1] && seg.length === 2 && method === "DELETE") {
     if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
     const id = Number(seg[1]);
-    await clearRooms(env, id);
-    await env.DB.batch([
-      env.DB.prepare(`DELETE FROM signups WHERE event_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM results WHERE event_id = ?`).bind(id),
-      env.DB.prepare(`DELETE FROM events WHERE id = ?`).bind(id),
-    ]);
+    await env.DB.batch(await deleteEventStmts(env, id));
     return json({ ok: true });
   }
 
@@ -833,10 +1028,15 @@ async function handle(request, env) {
         ).bind(id, r.member_id, r.raw_nick, r.gz_mask, r.rank_no, r.rank_label, r.stroke, r.handicap, r.final, r.prize, now)
       );
       // 다음 인식 때 같은 사람으로 찾을 수 있게 골프존 ID·결과표 닉네임을 기억
+      // 마스터가 고친 연결이 최신 정보: 같은 골프존 ID·닉네임이 다른 회원에게 잘못 붙어 있으면 떼어낸다
       if (r.member_id && r.gz_mask)
-        stmts.push(env.DB.prepare(`UPDATE members SET gz_mask = ? WHERE id = ?`).bind(r.gz_mask, r.member_id));
+        stmts.push(
+          env.DB.prepare(`UPDATE members SET gz_mask = NULL WHERE gz_mask = ? AND id <> ?`).bind(r.gz_mask, r.member_id),
+          env.DB.prepare(`UPDATE members SET gz_mask = ? WHERE id = ?`).bind(r.gz_mask, r.member_id)
+        );
       if (r.member_id && r.raw_nick)
         stmts.push(
+          env.DB.prepare(`DELETE FROM member_aliases WHERE alias = ? AND member_id <> ?`).bind(r.raw_nick, r.member_id),
           env.DB.prepare(`INSERT OR IGNORE INTO member_aliases (member_id, alias, created_at) VALUES (?, ?, ?)`).bind(
             r.member_id,
             r.raw_nick,
@@ -884,7 +1084,7 @@ async function handle(request, env) {
       events: evs || [],
       results: rows || [],
       members: (mem || []).map((m) => ({ id: m.id, nickname: m.nickname, name: isMaster ? m.name : undefined, role: m.role })),
-      pending: isMaster ? pending || [] : [],
+      pending: isMaster ? (pending || []).filter((e) => startTs(e) <= Date.now()) : [], // 시작한 대회만
     });
   }
 

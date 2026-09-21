@@ -1,7 +1,9 @@
 /* 스크린골프 동호회 예약 — 프론트엔드 */
 
 const DOW = ["일", "월", "화", "수", "목", "금", "토"];
-const ROLE_LABEL = { master: "마스터", member: "정회원", guest: "게스트" };
+const ROLE_LABEL = { master: "마스터", dev: "개발자", member: "정회원", guest: "게스트" };
+/** 마스터 권한이 있는 등급 (개발자 포함) */
+const isAdmin = (m) => !!m && (m.role === "master" || m.role === "dev");
 const ST_LABEL = { yes: "참가", hold: "보류", no: "비참가", wait: "대기" };
 const MAX_ROOMS = 6;
 
@@ -28,6 +30,11 @@ const S = {
   review: null, // 결과 검토 중인 행들
   ocrBusy: false,
   backTo: null,
+  selMode: false, // 계정 정리(선택 삭제) 모드
+  sel: new Set(),
+  aliasOpen: null, // 인식 정보를 펼친 회원 id
+  aliases: [],
+  testBusy: false,
 };
 
 /** 화면에 보일 이름: 닉네임이 있으면 닉네임 */
@@ -320,7 +327,7 @@ function rsvpHTML(ev, wide) {
 /* ---------- 일정 목록 ---------- */
 
 function scheduleHTML() {
-  const master = S.me.role === "master";
+  const master = isAdmin(S.me);
   const pinned = S.notices.filter((n) => n.pinned).slice(0, 2);
   let html = "";
 
@@ -491,7 +498,7 @@ function noReplyHTML(ev, master) {
 function eventHTML() {
   const ev = S.detail;
   if (!ev) return `<div class="empty">불러오는 중…</div>`;
-  const master = S.me.role === "master";
+  const master = isAdmin(S.me);
   const assigned = !!ev.assigned_at;
 
   const roomsHTML = assigned
@@ -760,7 +767,7 @@ function shareText(ev) {
 /* ---------- 공지 ---------- */
 
 function noticesHTML() {
-  const master = S.me.role === "master";
+  const master = isAdmin(S.me);
   let html = "";
 
   if (master) {
@@ -827,9 +834,12 @@ function noticeFormHTML(n) {
 /* ---------- 회원 ---------- */
 
 function membersHTML() {
-  const master = S.me.role === "master";
+  const master = isAdmin(S.me);
   const pending = S.members.filter((m) => m.status === "pending");
-  const active = S.members.filter((m) => m.status === "approved");
+  const ROLE_ORDER = { master: 0, dev: 1, member: 2, guest: 3 };
+  const active = S.members
+    .filter((m) => m.status === "approved")
+    .sort((a, b) => ROLE_ORDER[a.role] - ROLE_ORDER[b.role] || nm(a).localeCompare(nm(b), "ko", { numeric: true }));
   const blocked = S.members.filter((m) => m.status === "rejected");
 
   let html = "";
@@ -854,39 +864,31 @@ function membersHTML() {
     </section>`;
   }
 
+  if (master) {
+    const idle = active.filter((m) => m.activity === 0 && m.id !== S.me.id && !isAdmin(m));
+    html += `<section class="card tools">
+      <h2>계정 정리</h2>
+      ${
+        S.selMode
+          ? `<div class="hint">삭제할 계정을 체크하세요. 마스터·개발자 계정은 지울 수 없습니다. 지난 대회 결과는 '비회원'으로 남습니다.</div>
+            <div class="btn-row">
+              <button class="btn sm ghost" id="selAll">마스터·개발자 빼고 전체 선택</button>
+              <button class="btn sm ghost" id="selIdle">활동 없는 계정 선택 (${idle.length})</button>
+              <button class="btn sm ghost" id="selTest">테스트 계정 선택</button>
+              <button class="btn sm danger" id="selDelete" ${S.sel.size ? "" : "disabled"}>선택 삭제 (${S.sel.size})</button>
+              <button class="btn sm ghost" id="selCancel">닫기</button>
+            </div>`
+          : `<div class="hint">가입만 하고 쓰지 않는 계정을 한 번에 지울 수 있습니다. 활동 없는 계정 ${idle.length}명.</div>
+            <div class="btn-row"><button class="btn sm ghost" id="selStart">정리 시작</button></div>`
+      }
+    </section>`;
+  }
+
   html += `<section class="card">
     <h2>회원 ${active.length}명</h2>
     <div class="mlist">${
       active.length
-        ? active
-            .map(
-              (m) => `<div class="mrow">
-          <div>
-            <div class="nm">${esc(nm(m))} <span class="role-pill ${m.role}">${ROLE_LABEL[m.role]}</span></div>
-            ${
-              master
-                ? `<div class="sub">${esc(m.name)} · ${esc(m.login_id)}${m.phone ? " · " + esc(m.phone) : ""}${
-                    m.gz_mask ? " · 골프존 " + esc(m.gz_mask) : ""
-                  }${m.nickname ? "" : ' · <span style="color:var(--flag)">닉네임 없음</span>'}</div>`
-                : ""
-            }
-          </div>
-          ${
-            master
-              ? `<div class="acts">
-                  <select data-role-of="${m.id}" style="padding:5px 8px;border:1px solid var(--line);border-radius:7px">
-                    ${["master", "member", "guest"]
-                      .map((r) => `<option value="${r}" ${m.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`)
-                      .join("")}
-                  </select>
-                  <button class="btn sm ghost" data-nick="${m.id}" data-cur="${esc(m.nickname || "")}">닉네임</button>
-                  <button class="btn sm danger" data-block="${m.id}">정지</button>
-                </div>`
-              : ""
-          }
-        </div>`
-            )
-            .join("")
+        ? active.map((m) => memberRowHTML(m, master)).join("")
         : `<div class="empty">아직 승인된 회원이 없습니다.</div>`
     }</div>
   </section>`;
@@ -907,7 +909,85 @@ function membersHTML() {
         .join("")}</div>
     </section>`;
   }
+  if (S.me.role === "dev") html += testToolsHTML();
   return html;
+}
+
+function memberRowHTML(m, master) {
+  const canDel = master && m.id !== S.me.id && !isAdmin(m);
+  const tags = `${m.is_test ? '<span class="tag ok">테스트</span>' : ""}${
+    master && m.activity === 0 ? ' <span class="tag">활동 없음</span>' : ""
+  }`;
+  return `<div class="mrow ${S.selMode && S.sel.has(m.id) ? "picked" : ""}">
+    ${
+      master && S.selMode
+        ? `<input type="checkbox" class="selChk" data-sel="${m.id}" ${S.sel.has(m.id) ? "checked" : ""} ${canDel ? "" : "disabled"}>`
+        : ""
+    }
+    <div style="min-width:0">
+      <div class="nm">${esc(nm(m))} <span class="role-pill ${m.role}">${ROLE_LABEL[m.role]}</span> ${tags}</div>
+      ${
+        master
+          ? `<div class="sub">${esc(m.name)} · ${esc(m.login_id)}${m.phone ? " · " + esc(m.phone) : ""}${
+              m.gz_mask ? " · 골프존 " + esc(m.gz_mask) : ""
+            }${m.nickname ? "" : ' · <span style="color:var(--flag)">닉네임 없음</span>'}</div>`
+          : ""
+      }
+    </div>
+    ${
+      master && !S.selMode
+        ? `<div class="acts">
+            <select data-role-of="${m.id}" style="padding:5px 8px;border:1px solid var(--line);border-radius:7px">
+              ${["master", "dev", "member", "guest"]
+                .map((r) => `<option value="${r}" ${m.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`)
+                .join("")}
+            </select>
+            <button class="btn sm ghost" data-nick="${m.id}" data-cur="${esc(m.nickname || "")}">닉네임</button>
+            <button class="btn sm ghost" data-alias="${m.id}">인식</button>
+            ${m.id !== S.me.id ? `<button class="btn sm danger" data-block="${m.id}">정지</button>` : ""}
+            ${canDel ? `<button class="btn sm danger" data-del="${m.id}">삭제</button>` : ""}
+          </div>`
+        : ""
+    }
+  </div>
+  ${master && S.aliasOpen === m.id && !S.selMode ? aliasPanelHTML(m) : ""}`;
+}
+
+function aliasPanelHTML(m) {
+  return `<div class="alias-panel">
+    <div class="field" style="margin:0 0 10px">
+      <label>골프존 결과표 아이디 (별표 포함 그대로, 예: giveufi**)</label>
+      <div class="btn-row" style="margin:4px 0 0;flex-wrap:nowrap">
+        <input id="gzEdit" value="${esc(m.gz_mask || "")}" placeholder="비워두면 사용 안 함">
+        <button class="btn sm" id="gzSave" data-id="${m.id}">저장</button>
+      </div>
+    </div>
+    <label class="sub">이 회원으로 인식하는 이름 (예전 닉네임 · 결과표에 찍힌 닉네임)</label>
+    <div class="chips">${
+      S.aliases.length
+        ? S.aliases
+            .map((a) => `<span class="chip">${esc(a.alias)}<button data-aldel="${a.id}" data-mid="${m.id}" title="삭제">×</button></span>`)
+            .join("")
+        : '<span class="sub">없음</span>'
+    }</div>
+    <div class="hint">사진 인식에서 다른 사람으로 잘못 연결됐다면: ① 결과 화면 → 결과 수정에서 올바른 회원으로 바꿔 저장하면 여기 정보도 자동으로 옮겨집니다.
+    ② 잘못 붙은 이름·골프존 아이디는 여기서 직접 지우거나 고칠 수 있습니다.</div>
+  </div>`;
+}
+
+function testToolsHTML() {
+  const n = S.members.filter((m) => m.is_test).length;
+  return `<section class="card tools">
+    <h2>🧪 테스트 도구</h2>
+    <div class="hint">테스트1~테스트20 계정(아이디 test1~test20, 비밀번호 1234)과 지난 대회 기록(랜덤 스코어·상금)을 만듭니다.
+    30분 뒤 시작하는 '방배정 테스트' 일정도 함께 만들어져, 20분 전에 자동 배정·시상 추첨되는 것을 확인할 수 있습니다.
+    실제 회원·대회에는 영향이 없고, 아래 버튼 하나로 전부 지울 수 있습니다.</div>
+    <div class="meta">현재 테스트 계정 ${n}명</div>
+    <div class="btn-row">
+      <button class="btn sm" id="testMake" ${S.testBusy ? "disabled" : ""}>${S.testBusy ? "만드는 중…" : n ? "지난 대회 8회 더 만들기" : "테스트 데이터 만들기"}</button>
+      ${n ? `<button class="btn sm danger" id="testClear" ${S.testBusy ? "disabled" : ""}>테스트 데이터 전부 삭제</button>` : ""}
+    </div>
+  </section>`;
 }
 
 /* ---------- 내 정보 ---------- */
@@ -967,6 +1047,8 @@ function bindBody() {
       toast(err.message, true);
     }
   });
+
+  bindMemberTools(on, bind);
 
   on("[data-nick]", async (e) => {
     const b = e.currentTarget;
@@ -1239,6 +1321,7 @@ function bindBody() {
       const el = e.currentTarget;
       try {
         await api(`/members/${el.dataset.roleOf}`, { method: "PATCH", body: { role: el.value } });
+        if (Number(el.dataset.roleOf) === S.me.id) S.me = (await api("/me")).me; // 내 등급을 바꾼 경우 바로 반영
         toast("등급을 바꿨습니다.");
       } catch (err) {
         toast(err.message, true);
@@ -1547,7 +1630,7 @@ function h2hData(aId, basis) {
 function recordsHTML() {
   const st = S.stats;
   if (!st) return `<div class="empty">불러오는 중…</div>`;
-  const master = S.me.role === "master";
+  const master = isAdmin(S.me);
   const years = [...new Set(st.events.map((e) => e.event_date.slice(0, 4)))].sort().reverse();
 
   let html = `<div class="seg">
@@ -1708,6 +1791,127 @@ function bindRecords(on, bind) {
   on("[data-openev]", (e) => {
     e.stopPropagation();
     openEvent(Number(e.currentTarget.dataset.openev), "records");
+  });
+}
+
+/* ---------- 회원 정리 · 인식 정보 · 테스트 도구 ---------- */
+
+function bindMemberTools(on, bind) {
+  const redraw = () => renderBody();
+  bind("selStart", () => {
+    S.selMode = true;
+    S.sel = new Set();
+    S.aliasOpen = null;
+    redraw();
+  });
+  bind("selCancel", () => {
+    S.selMode = false;
+    S.sel = new Set();
+    redraw();
+  });
+  const deletable = (m) => m.status === "approved" && m.id !== S.me.id && !isAdmin(m);
+  bind("selAll", () => {
+    S.members.filter(deletable).forEach((m) => S.sel.add(m.id));
+    redraw();
+  });
+  bind("selIdle", () => {
+    S.members.filter((m) => deletable(m) && m.activity === 0).forEach((m) => S.sel.add(m.id));
+    redraw();
+  });
+  bind("selTest", () => {
+    S.members.filter((m) => deletable(m) && m.is_test).forEach((m) => S.sel.add(m.id));
+    redraw();
+  });
+  on(
+    ".selChk",
+    (e) => {
+      const id = Number(e.currentTarget.dataset.sel);
+      if (e.currentTarget.checked) S.sel.add(id);
+      else S.sel.delete(id);
+      redraw();
+    },
+    "change"
+  );
+  bind("selDelete", async () => {
+    const names = S.members.filter((m) => S.sel.has(m.id)).map(nm);
+    if (!confirm(`${names.length}명 계정을 삭제합니다. 되돌릴 수 없습니다.\n\n${names.slice(0, 15).join(", ")}${names.length > 15 ? " 외" : ""}`)) return;
+    try {
+      const r = await api("/members-delete", { method: "POST", body: { ids: [...S.sel] } });
+      S.sel = new Set();
+      S.selMode = false;
+      await loadMembers();
+      render();
+      toast(`${r.deleted}명 계정을 삭제했습니다.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  on("[data-alias]", async (e) => {
+    const id = Number(e.currentTarget.dataset.alias);
+    if (S.aliasOpen === id) {
+      S.aliasOpen = null;
+      return redraw();
+    }
+    try {
+      S.aliases = (await api(`/members/${id}/aliases`)).aliases;
+      S.aliasOpen = id;
+      redraw();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-aldel]", async (e) => {
+    const b = e.currentTarget;
+    try {
+      await api(`/members/${b.dataset.mid}/aliases/${b.dataset.aldel}`, { method: "DELETE", body: {} });
+      S.aliases = (await api(`/members/${b.dataset.mid}/aliases`)).aliases;
+      redraw();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  bind("gzSave", async (e) => {
+    try {
+      await api(`/members/${e.currentTarget.dataset.id}`, { method: "PATCH", body: { gz_mask: $("gzEdit").value.trim() } });
+      await loadMembers();
+      redraw();
+      toast("골프존 아이디를 저장했습니다.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  bind("testMake", async () => {
+    S.testBusy = true;
+    redraw();
+    try {
+      const r = await api("/test-data", { method: "POST", body: { events: 8, upcoming: true } });
+      await Promise.all([loadMembers(), loadEvents()]);
+      S.stats = null;
+      toast(`테스트 계정 ${r.accounts}명 · 지난 대회 ${r.events}회${r.upcoming ? " · 배정 테스트 " + r.upcoming : ""} 생성`);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      S.testBusy = false;
+      render();
+    }
+  });
+  bind("testClear", async () => {
+    if (!confirm("테스트 계정과 테스트 대회를 모두 지웁니다. 진행할까요?")) return;
+    S.testBusy = true;
+    redraw();
+    try {
+      const r = await api("/test-data", { method: "DELETE", body: {} });
+      await Promise.all([loadMembers(), loadEvents()]);
+      S.stats = null;
+      toast(`테스트 계정 ${r.accounts}명 · 대회 ${r.events}건을 삭제했습니다.`);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      S.testBusy = false;
+      render();
+    }
   });
 }
 
