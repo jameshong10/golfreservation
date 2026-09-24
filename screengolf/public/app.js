@@ -35,7 +35,20 @@ const S = {
   aliasOpen: null, // 인식 정보를 펼친 회원 id
   aliases: [],
   testBusy: false,
+  features: {}, // { jev, ocr } — 마스터에게만 옴
+  chat: null, // 카톡 대화 읽기: null | { text, busy, people }
 };
+
+const svg = (d) =>
+  `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICON = {
+  schedule: svg('<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
+  records: svg('<path d="M8 4h8v5a4 4 0 0 1-8 0V4zM8 6H5a2 2 0 0 0 2 4h1M16 6h3a2 2 0 0 1-2 4h-1M12 13v4M8.5 20h7"/>'),
+  notice: svg('<path d="M4 10v4h3l6 4V6L7 10H4zM17 9a4 4 0 0 1 0 6"/>'),
+  members: svg('<circle cx="9" cy="8.5" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 5.5a3 3 0 0 1 0 6M17.5 14.2A5 5 0 0 1 20.5 19"/>'),
+  my: svg('<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/>'),
+};
+const LOGO = `<svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="var(--brand-2)"/><path d="M13 7v17" stroke="#fff" stroke-width="2" stroke-linecap="round"/><path d="M13 7.5l9 3.5-9 3.5z" fill="var(--flag)"/><ellipse cx="16" cy="24.5" rx="7" ry="2" fill="rgba(255,255,255,.25)"/></svg>`;
 
 /** 화면에 보일 이름: 닉네임이 있으면 닉네임 */
 const nm = (m) => (m && (m.nickname || m.name)) || "?";
@@ -142,21 +155,26 @@ function render() {
     bindGate();
     return;
   }
+  const tab = (key, label, badge = "") =>
+    `<button role="tab" aria-selected="${S.tab === key}" data-tab="${key}">${ICON[key]}<span>${label}</span>${badge}</button>`;
   app.innerHTML = `
     <header class="topbar">
-      <h1>⛳ 동호회 예약</h1>
-      <div class="who">
-        <span>${esc(nm(S.me))} · ${ROLE_LABEL[S.me.role]}</span>
-        <button id="btnOut">로그아웃</button>
+      <div class="topbar-in">
+        <div class="brand">${LOGO}<span>주오맨 <b>GOLF</b></span></div>
+        <div class="who">
+          <span class="avatar" aria-hidden="true">${esc(nm(S.me).slice(0, 1))}</span>
+          <span class="who-t"><b>${esc(nm(S.me))}</b><small>${ROLE_LABEL[S.me.role]}</small></span>
+          <button id="btnOut">로그아웃</button>
+        </div>
       </div>
     </header>
     <div class="shell">
       <nav class="tabs" role="tablist">
-        <button role="tab" aria-selected="${S.tab === "schedule"}" data-tab="schedule">일정</button>
-        <button role="tab" aria-selected="${S.tab === "records"}" data-tab="records">기록</button>
-        <button role="tab" aria-selected="${S.tab === "notice"}" data-tab="notice">공지${noticeBadge()}</button>
-        <button role="tab" aria-selected="${S.tab === "members"}" data-tab="members">회원${pendingBadge()}</button>
-        <button role="tab" aria-selected="${S.tab === "my"}" data-tab="my">내 정보</button>
+        ${tab("schedule", "일정")}
+        ${tab("records", "기록")}
+        ${tab("notice", "공지", noticeBadge())}
+        ${tab("members", "회원", pendingBadge())}
+        ${tab("my", "내 정보")}
       </nav>
       <main id="body"></main>
     </div>`;
@@ -174,7 +192,7 @@ function render() {
 }
 
 function pendingBadge() {
-  if (S.me.role !== "master") return "";
+  if (!isAdmin(S.me)) return "";
   const n = S.members.filter((m) => m.status === "pending").length;
   return n ? `<span class="badge">${n}</span>` : "";
 }
@@ -207,8 +225,11 @@ function gateHTML() {
   const reg = S.gate === "register";
   return `
   <div class="gate">
-    <div class="mark">⛳ 스크린골프 동호회</div>
-    <div class="sub">${reg ? "가입 신청 후 마스터가 승인하면 사용할 수 있습니다." : "동호회 계정으로 로그인하세요."}</div>
+    <div class="gate-hero">
+      ${LOGO}
+      <div class="mark">주오맨 <b>GOLF</b></div>
+      <div class="sub">${reg ? "가입 신청 후 마스터가 승인하면 사용할 수 있습니다." : "스크린골프 동호회 예약 · 방배정 · 기록"}</div>
+    </div>
     <div class="card">
       <div class="field"><label for="gid">아이디</label><input id="gid" autocomplete="username"></div>
       ${reg ? `<div class="field"><label for="gname">이름</label><input id="gname" autocomplete="name"></div>
@@ -256,6 +277,7 @@ function bindGate() {
         });
         S.token = r.token;
         S.me = r.me;
+        S.features = {};
         localStorage.setItem("sg_token", r.token);
         render();
         loadAll();
@@ -363,7 +385,7 @@ function scheduleHTML() {
   const [next, ...rest] = S.events;
   html += eventCardHTML(next, true);
   if (rest.length) {
-    html += `<h2 style="font-size:14px;color:var(--muted);margin:22px 0 10px">다음 일정 ${rest.length}건</h2>`;
+    html += `<h2 class="section-h">다음 일정 <span>${rest.length}</span></h2>`;
     html += rest.map((e) => eventCardHTML(e, false)).join("");
   }
   return html;
@@ -379,7 +401,7 @@ function countsLine(ev) {
 
 function eventCardHTML(ev, isNext) {
   return `
-  <article class="card${isNext ? " next" : ""}" data-open="${ev.id}" style="cursor:pointer">
+  <article class="card event-card${isNext ? " hero" : ""}" data-open="${ev.id}">
     <div class="when">
       <span class="time">${esc(ev.start_time)}</span>
       <span class="date">${fmtDate(ev.event_date)}</span>
@@ -529,7 +551,7 @@ function eventHTML() {
   ${
     master && S.showEditEvent
       ? eventFormHTML(ev)
-      : `<article class="card next">
+      : `<article class="card hero">
           <div class="when">
             <span class="time">${esc(ev.start_time)}</span>
             <span class="date">${fmtDate(ev.event_date)}</span>
@@ -556,13 +578,17 @@ function eventHTML() {
     ${!ev.responses.length ? `<div class="empty" style="padding:16px">아직 응답한 사람이 없습니다.</div>` : ""}
     ${
       master
-        ? `<div class="btn-row"><button class="btn sm ghost" id="shareBtn">단체방 공지문 복사</button></div>`
+        ? `<div class="btn-row">
+            <button class="btn sm ghost" id="shareBtn">단체방 공지문 복사</button>
+            ${S.chat ? "" : `<button class="btn sm ai" id="chatOpen"><span class="ai-badge">AI</span> 카톡 대화로 받기</button>`}
+          </div>`
         : ""
     }
   </section>
+  ${master && S.chat ? chatHTML() : ""}
 
   <section>
-    <h2 style="font-size:15px;margin:22px 0 10px">방 배정</h2>
+    <h2 class="section-h">방 배정</h2>
     ${roomsHTML}
     ${
       master
@@ -596,6 +622,127 @@ function eventHTML() {
         </section>`
       : ""
   }`;
+}
+
+/* ---------- 카톡 대화 → 참가 의사 (Jev) ---------- */
+
+function chatHTML() {
+  const C = S.chat;
+  const head = `<h2><span class="ai-badge">AI</span> 카톡 대화로 참가 의사 받기</h2>`;
+  if (!S.features.jev)
+    return `<section class="card ai-card">${head}
+      <div class="hint warn">Jev 키(TYPESAFE_API_KEY)가 설정되지 않아 쓸 수 없습니다. README의 'AI 설정'을 참고하세요.</div>
+      <div class="btn-row"><button class="btn sm ghost" id="chatClose">닫기</button></div></section>`;
+
+  if (!C.people)
+    return `<section class="card ai-card">${head}
+      <div class="hint">단체방에서 이 일정에 대한 답글 부분을 길게 눌러 복사한 뒤 붙여넣으세요. 사람마다 마지막으로 한 말을 읽어 참가 · 보류 · 불참을 골라 드립니다. 반영 전에 한 번 더 확인합니다.</div>
+      <div class="field" style="margin-top:10px">
+        <textarea id="chatText" rows="7" placeholder="[홍길동] [오후 3:12] 저 참석합니다!&#10;[김철수] [오후 3:15] 이번주는 패스요">${esc(C.text || "")}</textarea>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="chatRead" ${C.busy ? "disabled" : ""}>${C.busy ? "읽는 중…" : "AI로 읽기"}</button>
+        <button class="btn ghost" id="chatClose">닫기</button>
+      </div></section>`;
+
+  const n = C.people.filter((p) => p.member_id && p.set).length;
+  return `<section class="card ai-card review">${head}
+    <div class="hint">대화 ${C.parsed}개 · ${C.people.length}명. 회원 연결과 상태를 확인하고 반영하세요. 확실하지 않은 줄은 '반영 안 함'으로 두었습니다.</div>
+    ${C.people
+      .map(
+        (p, i) => `<div class="rv-row ${p.member_id ? "" : "unmatched"}">
+        <div class="rv-top">
+          <div class="rv-nick"><b>${esc(p.speaker)}</b>
+            ${p.match ? `<span class="tag ok">${esc(p.match)}${p.match_p ? " " + Math.round(p.match_p * 100) + "%" : ""}</span>` : '<span class="tag">연결 필요</span>'}
+            <div class="quote">“${esc(p.quote)}”</div></div>
+        </div>
+        <div class="row2">
+          <select data-ci="${i}" data-ck="member_id">${memberOptions(p.member_id)}</select>
+          <select data-ci="${i}" data-ck="set">
+            <option value="">반영 안 함</option>
+            ${["yes", "hold", "no"].map((s) => `<option value="${s}" ${p.set === s ? "selected" : ""}>${ST_LABEL[s]}</option>`).join("")}
+          </select>
+        </div>
+        ${p.status !== "none" ? `<div class="ai-p">AI 판단: ${ST_LABEL[p.status]} ${Math.round(p.p * 100)}%</div>` : `<div class="ai-p">AI 판단: 참가 이야기 없음</div>`}
+      </div>`
+      )
+      .join("")}
+    <div class="btn-row">
+      <button class="btn" id="chatApply" ${n && !C.busy ? "" : "disabled"}>${n}명 반영하기</button>
+      <button class="btn ghost" id="chatBack">다시 붙여넣기</button>
+      <button class="btn ghost" id="chatClose">닫기</button>
+    </div>
+  </section>`;
+}
+
+function bindChat(on, bind) {
+  bind("chatOpen", () => {
+    S.chat = { text: "" };
+    renderBody();
+    const t = $("chatText");
+    if (t) t.focus();
+  });
+  bind("chatText", (e) => (S.chat.text = e.target.value), "input");
+  bind("chatClose", () => {
+    S.chat = null;
+    renderBody();
+  });
+  bind("chatBack", () => {
+    S.chat = { text: S.chat.text };
+    renderBody();
+  });
+  bind("chatRead", async () => {
+    const text = $("chatText").value;
+    if (!text.trim()) return toast("카톡 대화를 붙여넣으세요.", true);
+    S.chat = { text, busy: true };
+    renderBody();
+    try {
+      const r = await api(`/events/${S.eventId}/chat`, { method: "POST", body: { text } });
+      S.chat = {
+        text,
+        parsed: r.parsed,
+        people: r.people.map((p) => ({ ...p, set: p.sure && p.member_id ? p.status : "" })),
+      };
+    } catch (err) {
+      S.chat = { text };
+      toast(err.message, true);
+    }
+    renderBody();
+  });
+  on(
+    "[data-ck]",
+    (e) => {
+      const el = e.currentTarget;
+      const p = S.chat.people[Number(el.dataset.ci)];
+      if (el.dataset.ck === "member_id") {
+        p.member_id = el.value ? Number(el.value) : null;
+        p.match = p.member_id ? "직접 선택" : null;
+        p.match_p = null;
+      } else p.set = el.value;
+      renderBody();
+    },
+    "change"
+  );
+  bind("chatApply", async () => {
+    const items = S.chat.people.filter((p) => p.member_id && p.set).map((p) => ({ member_id: p.member_id, status: p.set }));
+    S.chat.busy = true;
+    renderBody();
+    try {
+      const r = await api(`/events/${S.eventId}/rsvp-bulk`, { method: "POST", body: { items } });
+      S.detail = r.event;
+      S.chat = null;
+      await loadEvents();
+      renderBody();
+      if (r.errors.length) {
+        const who = r.errors.map((x) => nm(S.members.find((m) => m.id === x.member_id))).join(", ");
+        toast(`${r.done}명 반영 · ${r.errors.length}명 실패 (${who}): ${r.errors[0].error}`, true);
+      } else toast(`${r.done}명의 참가 의사를 반영했습니다.`);
+    } catch (err) {
+      S.chat.busy = false;
+      renderBody();
+      toast(err.message, true);
+    }
+  });
 }
 
 function assignText(ev) {
@@ -709,7 +856,7 @@ function reviewHTML() {
         <div class="rv-top">
           <input class="rv-rank" data-i="${i}" data-k="rank_label" value="${esc(r.rank_label || "")}" placeholder="순위">
           <div class="rv-nick"><b>${esc(r.raw_nick || "")}</b>${r.gz_mask ? ` <span class="sub">${esc(r.gz_mask)}</span>` : ""}
-            ${r.match ? `<span class="tag ok">${esc(r.match)} 일치</span>` : r.member_id ? "" : '<span class="tag">연결 필요</span>'}</div>
+            ${r.match ? `<span class="tag ${r.match === "AI 추정" ? "ai" : "ok"}">${esc(r.match)}${r.match_p ? " " + Math.round(r.match_p * 100) + "%" : " 일치"}</span>` : r.member_id ? "" : '<span class="tag">연결 필요</span>'}</div>
           <button class="rv-del" data-rvdel="${i}" title="이 줄 삭제">×</button>
         </div>
         <select data-i="${i}" data-k="member_id">${memberOptions(r.member_id)}</select>
@@ -984,6 +1131,7 @@ function testToolsHTML() {
     실제 회원·대회에는 영향이 없고, 아래 버튼 하나로 전부 지울 수 있습니다.</div>
     <div class="meta">현재 테스트 계정 ${n}명</div>
     <div class="btn-row">
+      ${n < 20 ? `<button class="btn sm ghost" id="testAccounts" ${S.testBusy ? "disabled" : ""}>계정 20개만 만들기</button>` : ""}
       <button class="btn sm" id="testMake" ${S.testBusy ? "disabled" : ""}>${S.testBusy ? "만드는 중…" : n ? "지난 대회 8회 더 만들기" : "테스트 데이터 만들기"}</button>
       ${n ? `<button class="btn sm danger" id="testClear" ${S.testBusy ? "disabled" : ""}>테스트 데이터 전부 삭제</button>` : ""}
     </div>
@@ -1036,6 +1184,7 @@ function bindBody() {
 
   bindResults(on, bind);
   bindRecords(on, bind);
+  bindChat(on, bind);
 
   bind("nickSave", async () => {
     try {
@@ -1459,6 +1608,7 @@ function bindResults(on, bind) {
           rows: r.rows.map((x) => ({
             member_id: x.member_id,
             match: x.match,
+            match_p: x.match_p,
             raw_nick: x.nickname,
             gz_mask: x.gz_mask,
             rank_label: x.rank_label,
@@ -1467,6 +1617,7 @@ function bindResults(on, bind) {
             final: x.final,
           })),
         };
+        if (r.ai_note) toast("AI 회원 찾기를 건너뛰었습니다: " + r.ai_note, true);
       } catch (err) {
         toast(err.message, true);
       } finally {
@@ -1523,6 +1674,7 @@ function bindResults(on, bind) {
       row[k] = k === "member_id" ? (el.value ? Number(el.value) : null) : el.value.trim();
       if (k === "member_id") {
         row.match = null;
+        row.match_p = null;
         if (!row.raw_nick && row.member_id) row.raw_nick = nm(S.members.find((m) => m.id === row.member_id));
         renderBody();
       }
@@ -1882,11 +2034,11 @@ function bindMemberTools(on, bind) {
     }
   });
 
-  bind("testMake", async () => {
+  const makeTest = async (body) => {
     S.testBusy = true;
     redraw();
     try {
-      const r = await api("/test-data", { method: "POST", body: { events: 8, upcoming: true } });
+      const r = await api("/test-data", { method: "POST", body });
       await Promise.all([loadMembers(), loadEvents()]);
       S.stats = null;
       toast(`테스트 계정 ${r.accounts}명 · 지난 대회 ${r.events}회${r.upcoming ? " · 배정 테스트 " + r.upcoming : ""} 생성`);
@@ -1896,7 +2048,9 @@ function bindMemberTools(on, bind) {
       S.testBusy = false;
       render();
     }
-  });
+  };
+  bind("testMake", () => makeTest({ events: 8, upcoming: true }));
+  bind("testAccounts", () => makeTest({ events: 0, upcoming: false }));
   bind("testClear", async () => {
     if (!confirm("테스트 계정과 테스트 대회를 모두 지웁니다. 진행할까요?")) return;
     S.testBusy = true;
@@ -1940,9 +2094,14 @@ async function loadTab() {
     toast(e.message, true);
   }
 }
+async function loadMe() {
+  const r = await api("/me");
+  S.me = r.me;
+  S.features = r.features || {};
+}
 async function loadAll() {
   try {
-    await Promise.all([loadEvents(), loadMembers(), loadNotices()]);
+    await Promise.all([loadMe(), loadEvents(), loadMembers(), loadNotices()]);
     render();
   } catch (e) {
     toast(e.message, true);
@@ -1955,6 +2114,7 @@ async function openEvent(id, from) {
     render();
   }
   S.review = null;
+  S.chat = null;
   S.eventId = id;
   S.view = "event";
   S.detail = null;
@@ -1984,6 +2144,8 @@ function signOut(silent) {
   S.events = [];
   S.members = [];
   S.notices = [];
+  S.features = {};
+  S.chat = null;
   S.view = "list";
   render();
   if (!silent) toast("로그아웃했습니다.");
@@ -2030,7 +2192,7 @@ setInterval(async () => {
 (async function boot() {
   if (S.token) {
     try {
-      S.me = (await api("/me")).me;
+      await loadMe();
       render();
       await loadAll();
       return;

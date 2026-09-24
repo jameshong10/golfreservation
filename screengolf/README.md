@@ -1,4 +1,4 @@
-# 스크린골프 동호회 예약
+# 주오맨 GOLF — 스크린골프 동호회 예약
 
 동호회원이 날짜별로 참가를 신청하고, **시작 20분 전에 방이 자동으로 랜덤 배정**되는 웹앱입니다.
 Cloudflare Pages(무료) + D1(무료) 위에서 돌아가고, GitHub에 push하면 자동 배포됩니다.
@@ -35,6 +35,9 @@ Cloudflare Pages(무료) + D1(무료) 위에서 돌아가고, GitHub에 push하�
 | 방 배정 | **시작 20분 전 정시에 Cron이 확정 인원만 랜덤 배정** (1~6번 방) |
 | 단체방 공지문 | 일정·마감·현재 인원을 한 번에 복사해 카톡 단체방에 붙여넣기 |
 | 공지 | 마스터만 작성·수정·삭제. 맨 위 고정하면 일정 화면에도 함께 표시 |
+| **AI 카톡 대화 읽기** | 단체방 답글을 붙여넣으면 **Jev**가 사람별 참가/보류/불참을 읽고 회원과 연결. 마스터가 확인 후 한 번에 반영 |
+| **AI 회원 찾기** | 결과 사진의 닉네임이 코드로 안 맞으면 **Jev**가 회원을 추정 ("AI 추정 90%"). 저장 전 마스터가 확인 |
+| 등급 | 마스터 / 개발자(마스터 권한 + 테스트 도구) / 정회원 / 게스트 |
 
 ### 인원별 방 나누기 규칙
 
@@ -81,10 +84,6 @@ wrangler d1 create screengolf
 ```bash
 wrangler d1 execute screengolf --remote --file=./schema.sql
 ```
-
-> 예전 버전을 이미 배포해 둔 데이터베이스라면 칼럼 추가가 필요합니다.
-> `wrangler d1 execute screengolf --remote --file=./migrations/001_rsvp.sql`
-> 처음 설치라면 건너뛰세요.
 
 바뀐 `wrangler.toml`도 push합니다.
 
@@ -134,6 +133,47 @@ Cloudflare 대시보드 → **Workers & Pages → Create → Pages → Connect t
 
 ---
 
+## AI 설정 (TypeSafe Jev)
+
+Jev는 **글자만 읽는 판단 모델**이라 사진은 못 읽습니다. 그래서 역할을 이렇게 나눕니다.
+
+| 기능 | 쓰는 키 | 없으면 |
+|---|---|---|
+| 카톡 대화 → 참가 의사 | `TYPESAFE_API_KEY` (Jev) | 버튼을 눌러도 '키 없음' 안내 |
+| 결과표 닉네임 → 회원 추정 | `TYPESAFE_API_KEY` (Jev) | 코드 매칭만 (닉네임·예전 닉네임·골프존 ID) |
+| 결과 사진 읽기 (OCR) | `GEMINI_API_KEY` 또는 `ANTHROPIC_API_KEY` | '직접 입력'만 가능 |
+
+키는 서버(Cloudflare)에만 둡니다. 브라우저 코드에는 절대 넣지 마세요.
+
+```bash
+wrangler pages secret put TYPESAFE_API_KEY --project-name screengolf
+# (선택) 모델 고정: JEV_MODEL = jev-1.13.0   기본값은 jev-latest
+```
+
+또는 대시보드 → Pages 프로젝트 → **Settings → Variables and Secrets**에 `TYPESAFE_API_KEY` 추가 후 다시 배포.
+Jev 호출은 요청 한 번에 여러 질문을 묶어 보내고, 확률이 낮은 판단(매칭 60% 미만, 참가 의사 55% 미만)은 자동 반영하지 않습니다.
+기준값은 `shared/jev.js` 맨 위 `JEV_MATCH_MIN` / `JEV_RSVP_MIN`.
+
+---
+
+## 운영 DB 초기화 (마스터 + 개발자만 남기기)
+
+`reset.sql`은 **마스터 계정과 홍그리1(→ 개발자 등급)만 남기고** 회원·일정·신청·방배정·결과·공지를 전부 지운 뒤,
+테스트 계정 **test1 ~ test20 (비밀번호 1234, 닉네임 테스트1~20)** 을 만듭니다. 되돌릴 수 없으니 꼭 백업부터 하세요.
+
+```bash
+# 0) 남을 계정 미리 확인 — 마스터와 홍그리1이 보여야 합니다
+wrangler d1 execute screengolf --remote --command "SELECT id, login_id, name, nickname, role FROM members WHERE role='master' OR nickname='홍그리1' OR name='홍그리1' OR login_id='홍그리1'"
+# 1) 백업
+wrangler d1 export screengolf --remote --output=backup.sql
+# 2) 초기화
+wrangler d1 execute screengolf --remote --file=./reset.sql
+```
+
+테스트 계정은 개발자 로그인 → 회원 탭 → 🧪 테스트 도구에서 언제든 지우거나(테스트 데이터 전부 삭제) 다시 만들 수 있습니다.
+
+---
+
 ## 이후 수정
 
 파일을 고치고 push하면 Cloudflare가 자동으로 다시 배포합니다.
@@ -180,7 +220,7 @@ cd worker && wrangler deploy && cd ..
 node test.mjs
 ```
 
-가입 승인·권한, 참가/보류/비참가 집계, 전날 23:59 보류 자동 제외, 당일 대기 접수,
+가입 승인·권한, 참가/보류/비참가 집계, Jev 연동(가짜 응답), reset.sql 초기화, 전날 23:59 보류 자동 제외, 당일 대기 접수,
 정원 초과 차단, 대기자 확정, 시작 20분 전 Cron 배정, 방 6개 제한을 검사합니다.
 
 ## 알아두실 점
@@ -204,19 +244,19 @@ node test.mjs
 screengolf/
 ├── public/
 │   ├── index.html
-│   ├── style.css
+│   ├── style.css           ← 디자인 (라이트/다크 자동, 휴대폰은 아래 탭바)
 │   └── app.js
 ├── functions/
 │   └── api/
 │       └── [[path]].js     ← 모든 API
 ├── shared/
-│   └── assign.js           ← 방 배정 로직 (Pages·Worker 공용)
+│   ├── assign.js           ← 방 배정 로직 (Pages·Worker 공용)
+│   └── jev.js              ← TypeSafe Jev 연동 (카톡 대화 · 회원 찾기)
 ├── worker/
 │   ├── src/index.js        ← 1분마다 도는 Cron
 │   └── wrangler.toml
 ├── schema.sql
-├── migrations/
-│   └── 001_rsvp.sql        ← 기존 DB 업그레이드용
+├── reset.sql               ← 운영 DB 초기화 + 테스트 계정
 ├── wrangler.toml
 ├── test.mjs
 └── README.md

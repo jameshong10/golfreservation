@@ -307,4 +307,99 @@ ok(r.accounts === 17 && r.events === 11, `테스트 데이터 전부 삭제 (계
 ok((await call("/api/members")).members.length === before, "실제 회원 수는 그대로");
 ok((await call("/api/stats")).events.length === 1, "실제 대회 기록은 그대로");
 
+/* 17. Jev: 결과표 닉네임 AI 매칭 · 카톡 대화로 참가 의사 받기 (API는 가짜 응답) */
+const jevCalls = [];
+function mockJev(answerFor) {
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes("generativelanguage"))
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(fake2) }] } }] }), { status: 200 });
+    const req = JSON.parse(opts.body);
+    jevCalls.push(req);
+    const answers = {};
+    for (const [k, q] of Object.entries(req.questions)) {
+      const c = answerFor(k, q, req.state) || "none";
+      answers[k] = { type: "choice", choice: c, probabilities: { [c]: 0.9 }, confidence: 0.8 };
+    }
+    return new Response(JSON.stringify({ model: "jev-test", answers }), { status: 200 });
+  };
+}
+const fake2 = { rows: [
+  { rank: "1", nickname: "스마일맨.준", gz_id: "wns10**", stroke: 3, handicap: -1, final: 2 },
+  { rank: "2", nickname: "무 산 ~", gz_id: null, stroke: 8, handicap: 3, final: 11 },
+]};
+ok((await call("/api/me")).features.jev === false, "Jev 키가 없으면 기능 꺼짐 표시");
+env.TYPESAFE_API_KEY = "sk-test";
+ok((await call("/api/me")).features.jev === true, "Jev 키가 있으면 기능 켜짐 표시");
+mockJev((k, q, state) => (state.names && state.names[0].표시_이름 === "무 산 ~" ? "m" + u3.id : "none"));
+r = await call(`/api/events/${evId}/ocr`, "POST", { images: [{ media_type: "image/jpeg", data: "AAAA" }] });
+ok(jevCalls.length === 1 && Object.keys(jevCalls[0].questions).length === 1, "코드로 못 찾은 1줄만 Jev에게 물음");
+ok(jevCalls[0].model === "jev-latest", "모델은 jev-latest");
+const aiRow = r.rows.find((x) => x.nickname === "무 산 ~");
+ok(aiRow.member_id === u3.id && aiRow.match === "AI 추정" && aiRow.match_p === 0.9, "Jev가 고른 회원으로 'AI 추정' 연결");
+
+// Jev가 실패해도 사진 인식 결과는 그대로
+globalThis.fetch = async (url) =>
+  String(url).includes("generativelanguage")
+    ? new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(fake2) }] } }] }), { status: 200 })
+    : new Response("{}", { status: 401 });
+r = await call(`/api/events/${evId}/ocr`, "POST", { images: [{ media_type: "image/jpeg", data: "AAAA" }] });
+ok(r.rows.length === 2 && r.rows.find((x) => x.nickname === "무 산 ~").member_id === null && /키 오류/.test(r.ai_note), "Jev 오류 → 연결만 비우고 안내");
+
+const chat = [
+  "--------------- 2026년 9월 24일 수요일 ---------------",
+  "[회원1/42/분당] [오후 3:12] 저 참석합니다!",
+  "[닉3] [오후 3:13] 이번주는 애매해요",
+  "목요일에 말씀드릴게요",
+  "[닉3] [오후 5:40] 아 그냥 패스할게요 ㅠ",
+  "[홍그리골프] [오후 3:15] ㅋㅋㅋ 지난주 공 진짜 안맞더라",
+  "[김모름] [오후 3:20] 참석이요",
+].join("\n");
+jevCalls.length = 0;
+mockJev((k, q, state) => {
+  const i = Number(k.slice(1));
+  const sp = state.speakers[i];
+  if (k[0] === "m") return "none";
+  const last = sp.메시지[sp.메시지.length - 1];
+  return /패스/.test(last) ? "no" : /참석/.test(last) ? "yes" : "none";
+});
+r = await call(`/api/events/${evId}/chat`, "POST", { text: chat });
+const bySp = Object.fromEntries(r.people.map((x) => [x.speaker, x]));
+ok(r.parsed === 5 && r.people.length === 4, `카톡 대화 5개 메시지 · 4명 (${r.parsed}/${r.people.length})`);
+ok(bySp["닉3"].quote === "아 그냥 패스할게요 ㅠ" && bySp["닉3"].status === "no", "마음을 바꾸면 마지막 말 기준 (닉3 → 불참)");
+ok(bySp["회원1/42/분당"].member_id === u1.id && bySp["회원1/42/분당"].match === "이름 포함", "'이름/나이/지역' 카톡 이름 → 코드로 회원 찾음");
+ok(bySp["홍그리골프"].status === "none" && !bySp["홍그리골프"].sure, "잡담은 참가 의사 없음");
+ok(bySp["김모름"].member_id === null, "모르는 사람은 연결 안 됨");
+ok(Object.keys(jevCalls[0].questions).filter((k) => k[0] === "m").length === 1, "회원 매칭은 코드로 못 찾은 1명만 Jev에게");
+globalThis.fetch = realFetch;
+
+const u3m = (await call("/api/members")).members.find((m) => m.login_id === "u3");
+r = await call(`/api/events/${evId}/rsvp-bulk`, "POST", { items: [
+  { member_id: u1.id, status: "yes" }, { member_id: u3m.id, status: "no" }, { member_id: u1.id, status: "no" },
+]});
+ok(r.done === 2 && r.event.responses.find((x) => x.id === u3m.id).status === "no", "대화 결과 한 번에 반영 (중복은 1번만)");
+delete env.TYPESAFE_API_KEY;
+try { await call(`/api/events/${evId}/chat`, "POST", { text: chat }); ok(false, "키 없으면 거부"); }
+catch (e) { ok(/TYPESAFE_API_KEY/.test(e.message), "Jev 키가 없으면 대화 읽기 안내"); }
+
+/* 18. reset.sql — 마스터 + 홍그리1만 남기고 비운 뒤 test1~20 생성 */
+{
+  db.exec(`UPDATE members SET nickname = '홍그리1', role = 'member' WHERE login_id = 'u5'`);
+  db.exec(`INSERT INTO notices (title, created_at) VALUES ('x', '2026-01-01')`);
+  const masters = db.prepare(`SELECT COUNT(*) c FROM members WHERE role = 'master'`).get().c;
+  db.exec(readFileSync("./reset.sql", "utf8"));
+  const left = db.prepare(`SELECT login_id, role, memo FROM members ORDER BY id`).all();
+  const real = left.filter((m) => m.memo !== "__TEST__");
+  ok(real.length === masters + 1 && real.every((m) => m.role === "master" || m.role === "dev"), `마스터 ${masters}명 + 개발자만 남음`);
+  ok(real.find((m) => m.login_id === "u5").role === "dev", "홍그리1 → 개발자");
+  ok(left.filter((m) => m.memo === "__TEST__").length === 20, "테스트 계정 20개 생성");
+  for (const t of ["events", "signups", "rooms", "room_members", "results", "notices"])
+    ok(db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c === 0, `${t} 비움`);
+  TOKEN = "";
+  const lg = await call("/api/login", "POST", { login_id: "test7", password: "1234" });
+  ok(lg.me.nickname === "테스트7" && lg.me.is_test, "test7 / 1234 로그인");
+  TOKEN = (await call("/api/login", "POST", { login_id: "u5", password: "1234" })).token;
+  r = await call("/api/test-data", "DELETE", {});
+  ok(r.accounts === 20, "개발자 버튼으로 테스트 계정 20개 삭제 가능");
+}
+
 console.log("\n모든 테스트 통과");

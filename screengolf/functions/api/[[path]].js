@@ -20,6 +20,7 @@ import {
   todayKST,
   yesCount,
 } from "../../shared/assign.js";
+import { jevMatchMembers, jevReadChat, jevReady, norm } from "../../shared/jev.js";
 
 const SESSION_DAYS = 30;
 
@@ -226,8 +227,6 @@ async function clearTestData(env) {
   return { events: (evs || []).length, accounts: (mem || []).length };
 }
 
-const norm = (s) => String(s == null ? "" : s).normalize("NFC").replace(/\s+/g, "").toLowerCase();
-
 /** 닉네임 변경 (본인 또는 마스터). 예전 닉네임은 별칭으로 남겨 사진 인식에 쓴다 */
 async function setNickname(env, member, nickname) {
   const nick = String(nickname == null ? "" : nickname).normalize("NFC").trim();
@@ -255,7 +254,7 @@ async function matchRows(env, rows) {
     `SELECT id, name, nickname, gz_mask FROM members WHERE status = 'approved'`
   ).all();
   const { results: aliases } = await env.DB.prepare(`SELECT member_id, alias FROM member_aliases`).all();
-  return rows.map((r) => {
+  const out = rows.map((r) => {
     const n = norm(r.nickname);
     const g = norm(r.gz_mask);
     let m = members.find((x) => x.nickname && x.nickname === r.nickname);
@@ -278,6 +277,27 @@ async function matchRows(env, rows) {
     }
     return { ...r, member_id: m ? m.id : null, match: m ? how : null };
   });
+
+  // 코드로 못 찾은 줄은 Jev에게 물어본다 (실패해도 결과는 그대로 쓴다 — 마스터가 직접 고름)
+  const miss = out.map((r, i) => (r.member_id ? -1 : i)).filter((i) => i >= 0);
+  let ai_note = null;
+  if (miss.length && jevReady(env)) {
+    try {
+      const got = await jevMatchMembers(
+        env,
+        miss.map((i) => ({ name: out[i].nickname, gz_mask: out[i].gz_mask })),
+        members,
+        aliases
+      );
+      miss.forEach((i, k) => {
+        if (!got[k] || out.some((x) => x.member_id === got[k].member_id)) return; // 이미 다른 줄이 차지한 회원은 제외
+        out[i] = { ...out[i], member_id: got[k].member_id, match: "AI 추정", match_p: got[k].p };
+      });
+    } catch (e) {
+      ai_note = e.message;
+    }
+  }
+  return { rows: out, ai_note };
 }
 
 /* ---------------- 사진 인식 (Claude API) ---------------- */
@@ -599,7 +619,8 @@ async function handle(request, env) {
   const isMaster = me.role === "master" || me.role === "dev";
   const isDev = me.role === "dev";
 
-  if (seg[0] === "me" && seg.length === 1 && method === "GET") return json({ me: publicMember(me) });
+  if (seg[0] === "me" && seg.length === 1 && method === "GET")
+    return json({ me: publicMember(me), features: isMaster ? { jev: jevReady(env), ocr: ocrReady(env) } : {} });
 
   if (seg[0] === "me" && seg.length === 1 && method === "PATCH") {
     if ("nickname" in body) {
@@ -796,7 +817,7 @@ async function handle(request, env) {
 
   if (seg[0] === "test-data" && method === "POST") {
     if (!isDev) return fail("개발자 계정만 할 수 있습니다.", 403);
-    const n = Math.min(Math.max(Number(body.events) || 8, 0), 20);
+    const n = Math.min(Math.max(body.events == null ? 8 : Number(body.events) || 0, 0), 20);
     return json(await makeTestData(env, n, body.upcoming !== false));
   }
 
@@ -927,6 +948,47 @@ async function handle(request, env) {
     return json({ event: await eventDetail(env, id, me), status: r.status, message: r.message });
   }
 
+  /* ---- 카톡 대화로 참가 의사 한 번에 받기 (Jev) ---- */
+
+  if (seg[0] === "events" && seg[1] && seg[2] === "chat" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    if (!jevReady(env)) return fail("Jev 키(TYPESAFE_API_KEY)가 아직 설정되지 않았습니다.");
+    const ev = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(Number(seg[1])).first();
+    if (!ev) return fail("일정을 찾을 수 없습니다.", 404);
+    const text = String(body.text || "").slice(0, 30000);
+    if (!text.trim()) return fail("카톡 대화를 붙여넣으세요.");
+    const { results: members } = await env.DB.prepare(
+      `SELECT id, name, nickname, gz_mask FROM members WHERE status = 'approved'`
+    ).all();
+    const { results: aliases } = await env.DB.prepare(`SELECT member_id, alias FROM member_aliases`).all();
+    const out = await jevReadChat(env, ev, text, members || [], aliases || []);
+    if (!out.parsed) return fail("대화에서 보낸 사람을 찾지 못했습니다. 카톡 대화를 그대로 복사해 붙여넣으세요.");
+    return json(out);
+  }
+
+  if (seg[0] === "events" && seg[1] && seg[2] === "rsvp-bulk" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const id = Number(seg[1]);
+    const ev = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(id).first();
+    if (!ev) return fail("일정을 찾을 수 없습니다.", 404);
+    const items = (Array.isArray(body.items) ? body.items : []).filter(
+      (x) => x && Number(x.member_id) && ["yes", "hold", "no", "wait"].includes(x.status)
+    );
+    if (!items.length) return fail("반영할 사람이 없습니다.");
+    const seen = new Set();
+    let done = 0;
+    const errors = [];
+    for (const x of items) {
+      const mid = Number(x.member_id);
+      if (seen.has(mid)) continue;
+      seen.add(mid);
+      const r = await setRsvp(env, ev, mid, x.status, true);
+      if (r.error) errors.push({ member_id: mid, error: r.error });
+      else done++;
+    }
+    return json({ event: await eventDetail(env, id, me), done, errors });
+  }
+
   /* ---- 방 배정 ---- */
 
   if (seg[0] === "events" && seg[1] && seg[2] === "assign" && method === "POST") {
@@ -970,7 +1032,7 @@ async function handle(request, env) {
     if (!images.length) return fail("사진을 골라주세요.");
     const out = await ocrResults(env, images);
     if (!out.rows.length) return fail("사진에서 순위표를 찾지 못했습니다.");
-    return json({ ...out, rows: await matchRows(env, out.rows) });
+    return json({ ...out, ...(await matchRows(env, out.rows)) });
   }
 
   /* ---- 대회 결과: 저장 / 삭제 ---- */
