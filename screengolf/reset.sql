@@ -11,9 +11,9 @@
 UPDATE members SET role = 'dev', status = 'approved'
  WHERE nickname = '홍그리1' OR name = '홍그리1' OR login_id = '홍그리1';
 
--- 2. 마스터 · 홍그리1 말고는 모두 삭제
+-- 2. 마스터 · 홍그리1 말고는 모두 삭제 (닉네임이 비어 있는 계정도 지워지도록 IFNULL)
 DELETE FROM members
- WHERE NOT (role = 'master' OR nickname = '홍그리1' OR name = '홍그리1' OR login_id = '홍그리1');
+ WHERE NOT (role = 'master' OR IFNULL(nickname, '') = '홍그리1' OR name = '홍그리1' OR login_id = '홍그리1');
 
 -- 3. 남은 계정에 딸린 것 말고는 모두 비우기
 DELETE FROM sessions       WHERE member_id NOT IN (SELECT id FROM members);

@@ -385,6 +385,7 @@ catch (e) { ok(/TYPESAFE_API_KEY/.test(e.message), "Jev 키가 없으면 대화 
 {
   db.exec(`UPDATE members SET nickname = '홍그리1', role = 'member' WHERE login_id = 'u5'`);
   db.exec(`INSERT INTO notices (title, created_at) VALUES ('x', '2026-01-01')`);
+  db.exec(`UPDATE members SET nickname = NULL WHERE login_id IN ('u6', 'u7')`); // 운영 DB처럼 닉네임 없는 계정
   const masters = db.prepare(`SELECT COUNT(*) c FROM members WHERE role = 'master'`).get().c;
   db.exec(readFileSync("./reset.sql", "utf8"));
   const left = db.prepare(`SELECT login_id, role, memo FROM members ORDER BY id`).all();
