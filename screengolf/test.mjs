@@ -224,7 +224,7 @@ ok(res1.filter((x) => x.rank_label === "T5").length === 2, "공동 순위 T5 유
   await call("/api/me", "PATCH", { nickname: "해피라구2" });
   TOKEN = t;
 }
-env.GEMINI_API_KEY = "AQ.test";
+env.gemini_api_key = "AQ.test"; // 운영에 소문자로 등록돼 있음
 const fake = { title: "주오맨0920", date: "26.09.20", rows: [
   { rank: "3", nickname: "홍그리골프", gz_id: "giveufi**", stroke: 6, handicap: 1, final: 7 },
   { rank: "1", nickname: "스마일맨.준", gz_id: "wns10**", stroke: 3, handicap: -1, final: 2 },

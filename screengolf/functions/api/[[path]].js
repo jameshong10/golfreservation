@@ -341,7 +341,7 @@ async function callGemini(env, images, prompt) {
   for (const m of models) {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      headers: { "content-type": "application/json", "x-goog-api-key": geminiKey(env) },
       body,
     });
     const data = await res.json().catch(() => ({}));
@@ -374,10 +374,12 @@ async function callClaude(env, images, prompt) {
   return (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
 }
 
-const ocrReady = (env) => !!(env.GEMINI_API_KEY || env.ANTHROPIC_API_KEY);
+// Cloudflare 변수 이름은 대소문자를 구분한다 — 소문자로 등록된 키(gemini_api_key)도 받아준다
+const geminiKey = (env) => env.GEMINI_API_KEY || env.gemini_api_key;
+const ocrReady = (env) => !!(geminiKey(env) || env.ANTHROPIC_API_KEY);
 
 async function ocrResults(env, images) {
-  const text = env.GEMINI_API_KEY ? await callGemini(env, images, OCR_PROMPT) : await callClaude(env, images, OCR_PROMPT);
+  const text = geminiKey(env) ? await callGemini(env, images, OCR_PROMPT) : await callClaude(env, images, OCR_PROMPT);
 
   const a = text.indexOf("{");
   const b = text.lastIndexOf("}");

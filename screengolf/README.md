@@ -146,7 +146,7 @@ Jev는 **글자만 읽는 판단 모델**이라 사진은 못 읽습니다. 그�
 키는 서버(Cloudflare)에만 둡니다. 브라우저 코드에는 절대 넣지 마세요.
 
 ```bash
-wrangler pages secret put TYPESAFE_API_KEY --project-name screengolf
+wrangler pages secret put TYPESAFE_API_KEY --project-name golfreservation
 # (선택) 모델 고정: JEV_MODEL = jev-1.13.0   기본값은 jev-latest
 ```
 
