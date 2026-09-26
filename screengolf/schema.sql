@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS members (
   memo       TEXT,
   nickname   TEXT,                            -- 동호회 닉네임 = 골프존 닉네임 (본인이 자유롭게 변경)
   gz_mask    TEXT,                            -- 골프존 결과화면의 가려진 아이디 (예: giveufi**) — 결과 저장 시 자동 기록
+  dues_year  INTEGER,                         -- 회비를 낸 해 (1년에 한 번, 예: 2026)
   created_at TEXT    NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_members_nickname ON members(nickname);
@@ -107,3 +108,21 @@ CREATE TABLE IF NOT EXISTS results (
 );
 CREATE INDEX IF NOT EXISTS idx_results_event ON results(event_id);
 CREATE INDEX IF NOT EXISTS idx_results_member ON results(member_id);
+
+-- 특별상 (홀인원 · 알바트로스 등) — 마스터가 대회마다 만든다
+CREATE TABLE IF NOT EXISTS jackpots (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id    INTEGER NOT NULL,
+  kind        TEXT    NOT NULL,             -- hio(홀인원) | albatross(알바트로스) | custom
+  label       TEXT    NOT NULL,             -- 화면에 보일 이름
+  amount      INTEGER NOT NULL DEFAULT 0,   -- 상금 (원)
+  note        TEXT,
+  winner_id   INTEGER,                      -- 달성한 회원 (비회원이면 NULL)
+  winner_name TEXT,                         -- 비회원 달성자 이름
+  hole_no     INTEGER,
+  won_at      TEXT,                         -- 달성 기록 시각
+  carried_to  INTEGER,                      -- 달성자 없이 이월된 일정 id
+  created_by  INTEGER,
+  created_at  TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jackpots_event ON jackpots(event_id);

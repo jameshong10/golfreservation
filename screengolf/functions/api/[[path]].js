@@ -22,7 +22,14 @@ import {
 } from "../../shared/assign.js";
 import { jevMatchMembers, jevReadChat, jevReady, norm } from "../../shared/jev.js";
 
-const SESSION_DAYS = 30;
+// 로그인은 사실상 풀리지 않게: 10년 유지 + 쓸 때마다 자동 연장
+const SESSION_DAYS = 3650;
+const SESSION_RENEW_DAYS = 3000; // 남은 기간이 이보다 짧아지면 다시 10년으로
+
+/** 올해 (KST) — 회비는 1년에 한 번 */
+const thisYear = () => Number(todayKST().slice(0, 4));
+
+const JACKPOT_KINDS = { hio: "홀인원", albatross: "알바트로스", custom: "특별상" };
 
 const H = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 const json = (d, s = 200) => new Response(JSON.stringify(d), { status: s, headers: H });
@@ -63,12 +70,17 @@ async function currentMember(request, env) {
   const token = h.startsWith("Bearer ") ? h.slice(7) : null;
   if (!token) return null;
   const row = await env.DB.prepare(
-    `SELECT m.* FROM sessions s JOIN members m ON m.id = s.member_id
+    `SELECT m.*, s.expires_at AS session_expires FROM sessions s JOIN members m ON m.id = s.member_id
      WHERE s.token = ? AND s.expires_at > ?`
   )
     .bind(token, Date.now())
     .first();
   if (!row || row.status !== "approved") return null;
+  if (row.session_expires - Date.now() < SESSION_RENEW_DAYS * 86400000) {
+    await env.DB.prepare(`UPDATE sessions SET expires_at = ? WHERE token = ?`)
+      .bind(Date.now() + SESSION_DAYS * 86400000, token)
+      .run();
+  }
   return row;
 }
 
@@ -78,6 +90,7 @@ const publicMember = (m) => ({
   name: m.name,
   nickname: m.nickname || null,
   gz_mask: m.gz_mask || null,
+  dues_year: m.dues_year || null,
   is_test: m.memo === TEST_MARK,
   activity: m.activity == null ? undefined : m.activity, // 참가신청 + 결과 기록 수 (마스터용)
   phone: m.phone,
@@ -99,6 +112,9 @@ function deleteMemberStmts(env, id) {
     env.DB.prepare(`DELETE FROM sessions WHERE member_id = ?`).bind(id),
     env.DB.prepare(`DELETE FROM member_aliases WHERE member_id = ?`).bind(id),
     env.DB.prepare(`UPDATE results SET member_id = NULL WHERE member_id = ?`).bind(id),
+    env.DB.prepare(
+      `UPDATE jackpots SET winner_name = COALESCE(winner_name, (SELECT COALESCE(nickname, name) FROM members WHERE id = ?)), winner_id = NULL WHERE winner_id = ?`
+    ).bind(id, id),
     env.DB.prepare(`DELETE FROM members WHERE id = ?`).bind(id),
   ];
 }
@@ -111,6 +127,8 @@ async function deleteEventStmts(env, id) {
     env.DB.prepare(`DELETE FROM rooms WHERE event_id = ?`).bind(id),
     env.DB.prepare(`DELETE FROM signups WHERE event_id = ?`).bind(id),
     env.DB.prepare(`DELETE FROM results WHERE event_id = ?`).bind(id),
+    env.DB.prepare(`DELETE FROM jackpots WHERE event_id = ?`).bind(id),
+    env.DB.prepare(`UPDATE jackpots SET carried_to = NULL WHERE carried_to = ?`).bind(id),
     env.DB.prepare(`DELETE FROM events WHERE id = ?`).bind(id),
   ];
 }
@@ -319,43 +337,75 @@ const OCR_PROMPT = `이 이미지들은 스크린골프 '골프존' 앱의 대�
 {"title": "...", "date": "...", "rows": [{"rank": "1", "nickname": "...", "gz_id": "...", "stroke": 0, "handicap": 0, "final": 0}]}`;
 
 /* Gemini (Google AI Studio 무료 키)
- * 1.5 / 2.0 Flash는 Google이 종료한 모델이라 현재 Flash 계열을 순서대로 시도한다.
+ * gemini-2.5-flash는 2026-10-16 종료 예정이라 목록에서 뺐다.
+ * 'gemini-flash-latest'는 Google이 항상 최신 Flash로 연결해 주는 별칭이라 맨 앞에 둔다.
  * 특정 모델을 쓰려면 Cloudflare 변수 GEMINI_MODEL 로 지정. */
-const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.5-flash", "gemini-2.5-flash"];
+const GEMINI_MODELS = ["gemini-flash-latest", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
 
-async function callGemini(env, images, prompt) {
-  const body = JSON.stringify({
-    contents: [
-      {
-        role: "user",
-        parts: [
-          ...images.map((im) => ({ inlineData: { mimeType: im.media_type || "image/jpeg", data: im.data } })),
-          { text: prompt },
-        ],
-      },
-    ],
-    generationConfig: { temperature: 0, responseMimeType: "application/json", maxOutputTokens: 8192 },
-  });
-  const models = env.GEMINI_MODEL ? [env.GEMINI_MODEL] : GEMINI_MODELS;
+// Cloudflare 변수 이름은 대소문자를 구분한다 — 소문자로 등록된 키(gemini_api_key)도 받아준다.
+// 붙여넣을 때 섞여 들어간 공백·줄바꿈·따옴표는 떼어낸다.
+function geminiKeyInfo(env) {
+  const names = ["GEMINI_API_KEY", "gemini_api_key", "GOOGLE_API_KEY"];
+  for (const n of names) {
+    const raw = env[n];
+    if (raw == null || raw === "") continue;
+    const clean = String(raw).trim().replace(/^["']|["']$/g, "").trim();
+    return { name: n, key: clean, dirty: clean !== String(raw) };
+  }
+  return null;
+}
+const geminiKey = (env) => {
+  const k = geminiKeyInfo(env);
+  return k ? k.key : "";
+};
+const ocrReady = (env) => !!(geminiKey(env) || env.ANTHROPIC_API_KEY);
+
+/** 키 자체가 잘못됐다는 응답인가 (모델 문제와 구분) */
+function isKeyError(status, msg) {
+  if (status === 401 || status === 403) return true;
+  return status === 400 && /api[ _]?key|API_KEY_INVALID|permission|unauthori[sz]ed/i.test(msg || "");
+}
+
+/** Gemini 호출. 모델이 없거나(404) 이 모델이 옵션을 안 받으면(400) 다음 모델로 넘어간다 */
+async function geminiGenerate(env, parts, { json = false, maxOutputTokens = 16384 } = {}) {
+  const key = geminiKey(env);
+  if (!key) throw new Error("Gemini 키(GEMINI_API_KEY)가 설정되지 않았습니다.");
+  const generationConfig = { temperature: 0, maxOutputTokens };
+  if (json) generationConfig.responseMimeType = "application/json";
+  const body = JSON.stringify({ contents: [{ role: "user", parts }], generationConfig });
+  const models = env.GEMINI_MODEL ? [String(env.GEMINI_MODEL).trim()] : GEMINI_MODELS;
   let lastErr = "";
   for (const m of models) {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": geminiKey(env) },
+      headers: { "content-type": "application/json", "x-goog-api-key": key },
       body,
     });
     const data = await res.json().catch(() => ({}));
+    const msg = (data.error && data.error.message) || String(res.status);
     if (res.ok) {
-      const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
-      return parts.map((p) => p.text || "").join("");
+      const cand = (data.candidates || [])[0] || {};
+      const text = ((cand.content || {}).parts || [])
+        .filter((p) => !p.thought)
+        .map((p) => p.text || "")
+        .join("");
+      return { text, model: m, finish: cand.finishReason || null };
     }
-    lastErr = `${m}: ${(data.error && data.error.message) || res.status}`;
+    lastErr = `${m}: ${msg}`;
     if (res.status === 429) throw new Error("사진 인식 무료 한도를 넘었습니다. 1~2분 뒤 다시 시도하거나 직접 입력하세요.");
-    if (res.status === 400 || res.status === 401 || res.status === 403)
-      throw new Error("Gemini 키 오류: " + lastErr + " — Cloudflare의 GEMINI_API_KEY 값을 확인하세요.");
-    // 404 = 이 모델은 없음 → 다음 모델
+    if (isKeyError(res.status, msg))
+      throw new Error("Gemini 키 오류: " + msg + " — Cloudflare의 GEMINI_API_KEY 값을 확인하세요.");
+    // 404(모델 없음) · 그 밖의 400(모델이 옵션을 거부) → 다음 모델
   }
   throw new Error("사진 인식 실패: " + lastErr);
+}
+
+async function callGemini(env, images, prompt) {
+  const parts = [
+    ...images.map((im) => ({ inlineData: { mimeType: im.media_type || "image/jpeg", data: im.data } })),
+    { text: prompt },
+  ];
+  return (await geminiGenerate(env, parts, { json: true })).text;
 }
 
 async function callClaude(env, images, prompt) {
@@ -374,9 +424,6 @@ async function callClaude(env, images, prompt) {
   return (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("");
 }
 
-// Cloudflare 변수 이름은 대소문자를 구분한다 — 소문자로 등록된 키(gemini_api_key)도 받아준다
-const geminiKey = (env) => env.GEMINI_API_KEY || env.gemini_api_key;
-const ocrReady = (env) => !!(geminiKey(env) || env.ANTHROPIC_API_KEY);
 
 async function ocrResults(env, images) {
   const text = geminiKey(env) ? await callGemini(env, images, OCR_PROMPT) : await callClaude(env, images, OCR_PROMPT);
@@ -466,12 +513,20 @@ async function eventDetail(env, eventId, me, skipAuto = false) {
     prize = ev.prize_json ? JSON.parse(ev.prize_json) : null;
   } catch (_) {}
 
+  const { results: jps } = await env.DB.prepare(
+    `SELECT j.*, m.nickname AS winner_nick, m.name AS winner_real FROM jackpots j
+     LEFT JOIN members m ON m.id = j.winner_id WHERE j.event_id = ? ORDER BY j.id`
+  )
+    .bind(eventId)
+    .all();
+
   const list = responses || [];
   const mine = me ? list.find((x) => x.id === me.id) : null;
   return decorate(ev, {
     responses: list,
     rooms,
     prize,
+    jackpots: (jps || []).map(jackpotOut),
     results: res || [],
     my_status: mine ? mine.status : null,
     my_dropped: mine ? !!mine.dropped : false,
@@ -555,18 +610,26 @@ async function handle(request, env) {
   /* ---- 가입 / 로그인 ---- */
 
   if (seg[0] === "register" && method === "POST") {
-    const { login_id, name, phone, password, memo } = body;
+    // 필수는 아이디 · 비밀번호뿐. 이름·닉네임·연락처는 선택 (나중에 내 정보·마스터가 채울 수 있음)
+    const login_id = String(body.login_id || "").trim();
+    const password = String(body.password || "");
     const nickname = String(body.nickname || "").normalize("NFC").trim();
-    if (!login_id || !name || !password || !nickname) return fail("아이디, 이름, 닉네임, 비밀번호를 모두 입력하세요.");
+    const name = String(body.name || "").trim() || nickname || login_id; // name 칼럼은 비울 수 없어 아이디로 채움
+    const phone = String(body.phone || "").trim() || null;
+    const memo = String(body.memo || "").trim() || null;
+    if (!login_id || !password) return fail("아이디와 비밀번호를 입력하세요.");
+    if (login_id.length > 30) return fail("아이디는 30자 이내로 정하세요.");
+    if (password.length < 4) return fail("비밀번호는 4자 이상으로 정하세요.");
     if (nickname.length > 20) return fail("닉네임은 20자 이내로 정하세요.");
-    if (String(password).length < 4) return fail("비밀번호는 4자 이상으로 정하세요.");
 
     const dup = await env.DB.prepare(`SELECT id FROM members WHERE login_id = ?`).bind(login_id).first();
     if (dup) return fail("이미 사용 중인 아이디입니다.");
-    const dupNick = await env.DB.prepare(`SELECT id FROM members WHERE nickname = ?`).bind(nickname).first();
-    if (dupNick) return fail("이미 사용 중인 닉네임입니다. 골프존 닉네임과 같게 입력하세요.");
+    if (nickname) {
+      const dupNick = await env.DB.prepare(`SELECT id FROM members WHERE nickname = ?`).bind(nickname).first();
+      if (dupNick) return fail("이미 사용 중인 닉네임입니다. 다른 닉네임을 쓰거나 비워두세요.");
+    }
 
-    // 첫 가입자는 자동으로 마스터가 된다
+    // 첫 가입자만 자동으로 마스터. 그 뒤로는 모두 '승인 대기'로 들어가 마스터가 정회원/게스트로 승인해야 로그인된다
     const cnt = await env.DB.prepare(`SELECT COUNT(*) AS c FROM members`).first();
     const first = cnt.c === 0;
 
@@ -576,7 +639,7 @@ async function handle(request, env) {
       `INSERT INTO members (login_id, name, nickname, phone, pw_hash, pw_salt, role, status, memo, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(login_id, name, nickname, phone || null, hash, salt, first ? "master" : "guest", first ? "approved" : "pending", memo || null, nowISO())
+      .bind(login_id, name, nickname || null, phone, hash, salt, first ? "master" : "guest", first ? "approved" : "pending", memo, nowISO())
       .run();
 
     return json({
@@ -584,7 +647,7 @@ async function handle(request, env) {
       first,
       message: first
         ? "마스터 계정이 만들어졌습니다. 바로 로그인하세요."
-        : "가입 신청이 접수됐습니다. 마스터 승인 후 로그인할 수 있습니다.",
+        : "가입 신청이 접수됐습니다. 마스터가 정회원 또는 게스트로 승인하면 로그인할 수 있습니다.",
     });
   }
 
@@ -624,10 +687,23 @@ async function handle(request, env) {
   if (seg[0] === "me" && seg.length === 1 && method === "GET")
     return json({ me: publicMember(me), features: isMaster ? { jev: jevReady(env), ocr: ocrReady(env) } : {} });
 
+  // AI 키 점검 (마스터·개발자) — 실제로 Gemini에 짧은 질문을 보내 본다
+  if (seg[0] === "diag" && method === "GET") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    return json(await diagnoseAI(env));
+  }
+
   if (seg[0] === "me" && seg.length === 1 && method === "PATCH") {
     if ("nickname" in body) {
       const err = await setNickname(env, me, body.nickname);
       if (err) return fail(err);
+    }
+    if ("name" in body || "phone" in body) {
+      const nm = "name" in body ? String(body.name || "").trim() : me.name;
+      const ph = "phone" in body ? String(body.phone || "").trim() || null : me.phone;
+      await env.DB.prepare(`UPDATE members SET name = ?, phone = ? WHERE id = ?`)
+        .bind(nm || me.nickname || me.login_id, ph, me.id)
+        .run();
     }
     const fresh = await env.DB.prepare(`SELECT * FROM members WHERE id = ?`).bind(me.id).first();
     return json({ me: publicMember(fresh) });
@@ -710,7 +786,11 @@ async function handle(request, env) {
     return json({
       members: list.map((m) => {
         const p = publicMember(m);
-        if (!isMaster) delete p.activity;
+        if (!isMaster) {
+          delete p.activity;
+          delete p.dues_year;
+          delete p.phone;
+        }
         return p;
       }),
     });
@@ -815,6 +895,124 @@ async function handle(request, env) {
     return json({ ok: true });
   }
 
+  /* ---- 회비 (1년에 한 번) ---- */
+
+  // { paid: true | false, year? } — 올해 회비 냄 / 취소. 게스트가 내면 정회원으로
+  if (seg[0] === "members" && seg[1] && seg[2] === "dues" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const id = Number(seg[1]);
+    const t = await env.DB.prepare(`SELECT * FROM members WHERE id = ?`).bind(id).first();
+    if (!t) return fail("회원을 찾을 수 없습니다.", 404);
+    const year = Number(body.year) || thisYear();
+    let promoted = false;
+    if (body.paid === false) {
+      await env.DB.prepare(`UPDATE members SET dues_year = NULL WHERE id = ? AND dues_year = ?`).bind(id, year).run();
+    } else {
+      const stmts = [env.DB.prepare(`UPDATE members SET dues_year = ? WHERE id = ?`).bind(year, id)];
+      if (t.role === "guest" && t.status === "approved" && year >= thisYear()) {
+        stmts.push(env.DB.prepare(`UPDATE members SET role = 'member' WHERE id = ?`).bind(id));
+        promoted = true;
+      }
+      await env.DB.batch(stmts);
+    }
+    const fresh = await env.DB.prepare(`SELECT * FROM members WHERE id = ?`).bind(id).first();
+    return json({ ok: true, promoted, member: publicMember(fresh) });
+  }
+
+  /* ---- 특별상 (홀인원 · 알바트로스) ---- */
+
+  if (seg[0] === "events" && seg[1] && seg[2] === "jackpots" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const id = Number(seg[1]);
+    const ev = await env.DB.prepare(`SELECT id FROM events WHERE id = ?`).bind(id).first();
+    if (!ev) return fail("일정을 찾을 수 없습니다.", 404);
+    const kind = JACKPOT_KINDS[body.kind] ? body.kind : "custom";
+    const label = String(body.label || "").trim() || JACKPOT_KINDS[kind];
+    if (label.length > 30) return fail("특별상 이름은 30자 이내로 정하세요.");
+    const amount = Math.max(0, Math.round(Number(body.amount) || 0));
+    if (!amount) return fail("상금을 입력하세요.");
+    await env.DB.prepare(
+      `INSERT INTO jackpots (event_id, kind, label, amount, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(id, kind, label, amount, String(body.note || "").trim() || null, me.id, nowISO())
+      .run();
+    return json({ event: await eventDetail(env, id, me, true) });
+  }
+
+  if (seg[0] === "jackpots" && seg[1] && !seg[2] && method === "PATCH") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const j = await env.DB.prepare(`SELECT * FROM jackpots WHERE id = ?`).bind(Number(seg[1])).first();
+    if (!j) return fail("특별상을 찾을 수 없습니다.", 404);
+    const fields = [];
+    const vals = [];
+    if ("label" in body) {
+      const l = String(body.label || "").trim();
+      if (!l) return fail("이름을 입력하세요.");
+      fields.push("label = ?");
+      vals.push(l);
+    }
+    if ("amount" in body) {
+      const a = Math.max(0, Math.round(Number(body.amount) || 0));
+      if (!a) return fail("상금을 입력하세요.");
+      fields.push("amount = ?");
+      vals.push(a);
+    }
+    if ("note" in body) {
+      fields.push("note = ?");
+      vals.push(String(body.note || "").trim() || null);
+    }
+    if (body.clear_winner) {
+      fields.push("winner_id = NULL", "winner_name = NULL", "hole_no = NULL", "won_at = NULL");
+    } else if ("winner_id" in body || "winner_name" in body) {
+      const wid = body.winner_id ? Number(body.winner_id) : null;
+      const wname = String(body.winner_name || "").trim() || null;
+      if (!wid && !wname) return fail("달성한 회원을 고르거나 이름을 적으세요.");
+      if (j.carried_to) return fail("이미 다음 일정으로 이월된 특별상입니다.");
+      const hole = body.hole_no === "" || body.hole_no == null ? null : Math.round(Number(body.hole_no));
+      if (hole != null && (hole < 1 || hole > 18)) return fail("홀 번호는 1~18 사이로 적으세요.");
+      fields.push("winner_id = ?", "winner_name = ?", "hole_no = ?", "won_at = ?");
+      vals.push(wid, wid ? null : wname, hole, nowISO());
+    }
+    if (!fields.length) return fail("바꿀 내용이 없습니다.");
+    vals.push(j.id);
+    await env.DB.prepare(`UPDATE jackpots SET ${fields.join(", ")} WHERE id = ?`).bind(...vals).run();
+    return json({ event: await eventDetail(env, j.event_id, me, true) });
+  }
+
+  if (seg[0] === "jackpots" && seg[1] && !seg[2] && method === "DELETE") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const j = await env.DB.prepare(`SELECT * FROM jackpots WHERE id = ?`).bind(Number(seg[1])).first();
+    if (!j) return fail("특별상을 찾을 수 없습니다.", 404);
+    await env.DB.prepare(`DELETE FROM jackpots WHERE id = ?`).bind(j.id).run();
+    return json({ event: await eventDetail(env, j.event_id, me, true) });
+  }
+
+  // 달성자가 없으면 다음 일정으로 그대로 넘긴다 (금액은 넘긴 뒤 올릴 수 있음)
+  if (seg[0] === "jackpots" && seg[1] && seg[2] === "carry" && method === "POST") {
+    if (!isMaster) return fail("마스터만 할 수 있습니다.", 403);
+    const j = await env.DB.prepare(`SELECT * FROM jackpots WHERE id = ?`).bind(Number(seg[1])).first();
+    if (!j) return fail("특별상을 찾을 수 없습니다.", 404);
+    if (j.won_at) return fail("이미 달성자가 있는 특별상입니다.");
+    if (j.carried_to) return fail("이미 이월했습니다.");
+    const ev = await env.DB.prepare(`SELECT * FROM events WHERE id = ?`).bind(j.event_id).first();
+    const next = await env.DB.prepare(
+      `SELECT * FROM events WHERE (event_date > ?) OR (event_date = ? AND start_time > ?)
+       ORDER BY event_date, start_time LIMIT 1`
+    )
+      .bind(ev.event_date, ev.event_date, ev.start_time)
+      .first();
+    if (!next) return fail("넘길 다음 일정이 없습니다. 다음 일정을 먼저 만드세요.");
+    const add = Math.max(0, Math.round(Number(body.add) || 0));
+    const [, mo, d] = ev.event_date.split("-").map(Number);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO jackpots (event_id, kind, label, amount, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(next.id, j.kind, j.label, j.amount + add, `${mo}/${d} 대회에서 이월${j.note ? " · " + j.note : ""}`, me.id, nowISO()),
+      env.DB.prepare(`UPDATE jackpots SET carried_to = ? WHERE id = ?`).bind(next.id, j.id),
+    ]);
+    return json({ event: await eventDetail(env, j.event_id, me, true), next: { id: next.id, event_date: next.event_date, start_time: next.start_time } });
+  }
+
   /* ---- 테스트 데이터 ---- */
 
   if (seg[0] === "test-data" && method === "POST") {
@@ -844,7 +1042,19 @@ async function handle(request, env) {
     )
       .bind(me.id, from)
       .all();
-    return json({ events: (results || []).map((e) => decorate(e)) });
+    const { results: jps } = await env.DB.prepare(
+      `SELECT j.*, m.nickname AS winner_nick, m.name AS winner_real FROM jackpots j
+       JOIN events e ON e.id = j.event_id LEFT JOIN members m ON m.id = j.winner_id
+       WHERE e.event_date >= ? ORDER BY j.id`
+    )
+      .bind(from)
+      .all();
+    const byEv = {};
+    for (const j of jps || []) (byEv[j.event_id] = byEv[j.event_id] || []).push(jackpotOut(j));
+    return json({
+      events: (results || []).map((e) => decorate(e, { jackpots: byEv[e.id] || [] })),
+      last: isMaster ? await lastSettings(env) : undefined,
+    });
   }
 
   if (seg[0] === "events" && seg.length === 1 && method === "POST") {
@@ -1144,7 +1354,13 @@ async function handle(request, env) {
     )
       .bind(todayKST())
       .all();
+    const { results: fame } = await env.DB.prepare(
+      `SELECT j.*, e.event_date, e.title, e.place, m.nickname AS winner_nick, m.name AS winner_real
+       FROM jackpots j JOIN events e ON e.id = j.event_id LEFT JOIN members m ON m.id = j.winner_id
+       WHERE j.won_at IS NOT NULL ORDER BY e.event_date DESC, j.id DESC`
+    ).all();
     return json({
+      jackpots: (fame || []).map((j) => ({ ...jackpotOut(j), event_date: j.event_date, title: j.title, place: j.place })),
       events: evs || [],
       results: rows || [],
       members: (mem || []).map((m) => ({ id: m.id, nickname: m.nickname, name: isMaster ? m.name : undefined, role: m.role })),
@@ -1161,4 +1377,73 @@ async function reapplyPrizes(env, eventId, amounts) {
   if (!results || !results.length) return;
   const ranked = rankAndPrize(results, amounts).rows;
   await env.DB.batch(ranked.map((r) => env.DB.prepare(`UPDATE results SET prize = ? WHERE id = ?`).bind(r.prize, r.id)));
+}
+
+/** 특별상 한 건을 화면용으로 */
+function jackpotOut(j) {
+  return {
+    id: j.id,
+    event_id: j.event_id,
+    kind: j.kind,
+    label: j.label,
+    amount: j.amount,
+    note: j.note,
+    winner_id: j.winner_id,
+    winner: j.winner_id ? j.winner_nick || j.winner_real || "?" : j.winner_name || null,
+    hole_no: j.hole_no,
+    won_at: j.won_at,
+    carried_to: j.carried_to,
+  };
+}
+
+/** AI 연결 점검 — 키가 들어 있는지, 실제로 응답하는지 */
+async function diagnoseAI(env) {
+  const out = { gemini: null, jev: { ready: jevReady(env) }, claude: { ready: !!env.ANTHROPIC_API_KEY } };
+  const info = geminiKeyInfo(env);
+  const found = Object.keys(env).filter((k) => /gemini|google/i.test(k));
+  if (!info) {
+    out.gemini = {
+      ready: false,
+      error: found.length
+        ? `비슷한 이름의 변수(${found.join(", ")})는 있지만 GEMINI_API_KEY가 없습니다. 이름을 정확히 GEMINI_API_KEY로 바꾸세요.`
+        : "GEMINI_API_KEY가 없습니다. Cloudflare Pages → 설정 → 변수 및 비밀에서 '비밀(Secret)' 유형으로 추가한 뒤 다시 배포하세요.",
+    };
+    return out;
+  }
+  const k = info.key;
+  const g = {
+    ready: true,
+    var_name: info.name,
+    key_hint: k.length > 10 ? `${k.slice(0, 4)}…${k.slice(-4)} (${k.length}자)` : `(${k.length}자)`,
+    cleaned: info.dirty,
+    looks_ok: k.length >= 20 && !/\s/.test(k), // Google 키는 AIza… 또는 AQ.… 형식 — 형식보다 길이·공백만 본다
+    model_setting: env.GEMINI_MODEL || null,
+  };
+  const t0 = Date.now();
+  try {
+    const r = await geminiGenerate(env, [{ text: "숫자 1 하나만 답하세요." }], { maxOutputTokens: 2048 });
+    g.ok = true;
+    g.model = r.model;
+    g.reply = String(r.text || "").trim().slice(0, 20);
+  } catch (e) {
+    g.ok = false;
+    g.error = e.message;
+  }
+  g.ms = Date.now() - t0;
+  out.gemini = g;
+  return out;
+}
+
+/** 지난번 설정 — 새 일정 · 특별상 폼을 지난번 값으로 미리 채운다 */
+async function lastSettings(env) {
+  const ev = await env.DB.prepare(
+    `SELECT event_date, start_time, title, place, rooms_count, entry_fee, spread_guests FROM events ORDER BY id DESC LIMIT 1`
+  ).first();
+  const { results } = await env.DB.prepare(
+    `SELECT kind, label, amount, note FROM jackpots WHERE id IN (SELECT MAX(id) FROM jackpots GROUP BY kind, label)`
+  ).all();
+  const jackpots = {};
+  for (const j of results || []) jackpots[j.kind === "custom" ? "custom:" + j.label : j.kind] = { label: j.label, amount: j.amount, note: j.note };
+  const lastJp = await env.DB.prepare(`SELECT kind FROM jackpots ORDER BY id DESC LIMIT 1`).first();
+  return { event: ev || null, jackpots, jackpot_kind: lastJp ? lastJp.kind : null };
 }

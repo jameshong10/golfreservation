@@ -243,7 +243,7 @@ globalThis.fetch = async (url) => {
 };
 r = await call(`/api/events/${evId}/ocr`, "POST", { images: [{ media_type: "image/jpeg", data: "AAAA" }] });
 globalThis.fetch = realFetch;
-ok(hit.length === 2 && hit[1] === "gemini-3.5-flash", `Gemini: 모델이 없으면 다음 모델로 (${hit.join(" → ")})`);
+ok(hit.length === 2 && hit[0] === "gemini-flash-latest" && hit[1] === "gemini-3.8-flash", `Gemini: 모델이 없으면 다음 모델로 (${hit.join(" → ")})`);
 const byNick = Object.fromEntries(r.rows.map((x) => [x.nickname, x]));
 ok(r.rows.length === 5, "겹친 캡처의 중복 행 제거 (6 → 5)");
 ok(byNick["홍그리골프"].member_id === masterM.id && byNick["홍그리골프"].match === "닉네임", "현재 닉네임으로 매칭");
@@ -381,26 +381,198 @@ delete env.TYPESAFE_API_KEY;
 try { await call(`/api/events/${evId}/chat`, "POST", { text: chat }); ok(false, "키 없으면 거부"); }
 catch (e) { ok(/TYPESAFE_API_KEY/.test(e.message), "Jev 키가 없으면 대화 읽기 안내"); }
 
-/* 18. reset.sql — 마스터 + 홍그리1만 남기고 비운 뒤 test1~20 생성 */
+/* 18. 가입: 아이디 · 비밀번호만으로 신청 → 마스터 승인 필수 */
 {
-  db.exec(`UPDATE members SET nickname = '홍그리1', role = 'member' WHERE login_id = 'u5'`);
-  db.exec(`INSERT INTO notices (title, created_at) VALUES ('x', '2026-01-01')`);
-  db.exec(`UPDATE members SET nickname = NULL WHERE login_id IN ('u6', 'u7')`); // 운영 DB처럼 닉네임 없는 계정
-  const masters = db.prepare(`SELECT COUNT(*) c FROM members WHERE role = 'master'`).get().c;
-  db.exec(readFileSync("./reset.sql", "utf8"));
-  const left = db.prepare(`SELECT login_id, role, memo FROM members ORDER BY id`).all();
-  const real = left.filter((m) => m.memo !== "__TEST__");
-  ok(real.length === masters + 1 && real.every((m) => m.role === "master" || m.role === "dev"), `마스터 ${masters}명 + 개발자만 남음`);
-  ok(real.find((m) => m.login_id === "u5").role === "dev", "홍그리1 → 개발자");
-  ok(left.filter((m) => m.memo === "__TEST__").length === 20, "테스트 계정 20개 생성");
-  for (const t of ["events", "signups", "rooms", "room_members", "results", "notices"])
-    ok(db.prepare(`SELECT COUNT(*) c FROM ${t}`).get().c === 0, `${t} 비움`);
+  const mt = TOKEN;
   TOKEN = "";
-  const lg = await call("/api/login", "POST", { login_id: "test7", password: "1234" });
-  ok(lg.me.nickname === "테스트7" && lg.me.is_test, "test7 / 1234 로그인");
-  TOKEN = (await call("/api/login", "POST", { login_id: "u5", password: "1234" })).token;
-  r = await call("/api/test-data", "DELETE", {});
-  ok(r.accounts === 20, "개발자 버튼으로 테스트 계정 20개 삭제 가능");
+  try { await call("/api/register", "POST", { login_id: "onlyid" }); ok(false, "비밀번호 없으면 거부"); }
+  catch (e) { ok(/아이디와 비밀번호/.test(e.message), "비밀번호 없으면 가입 거부"); }
+  r = await call("/api/register", "POST", { login_id: "onlyid", password: "abcd" });
+  ok(r.ok && !r.first && /승인/.test(r.message), "아이디·비밀번호만으로 가입 신청");
+  try { await call("/api/login", "POST", { login_id: "onlyid", password: "abcd" }); ok(false, "승인 전 로그인 거부"); }
+  catch (e) { ok(/승인 대기/.test(e.message), "승인 전에는 로그인 안 됨 (마스터 승인 필수)"); }
+  await call("/api/register", "POST", { login_id: "nick2", password: "abcd", nickname: "새닉" });
+  try { await call("/api/register", "POST", { login_id: "nick3", password: "abcd", nickname: "새닉" }); ok(false, "닉네임 중복"); }
+  catch (e) { ok(/닉네임/.test(e.message), "닉네임을 적으면 중복은 막음"); }
+  TOKEN = mt;
+  const p = (await call("/api/members")).members.find((m) => m.login_id === "onlyid");
+  ok(p.status === "pending" && p.role === "guest" && p.name === "onlyid" && p.nickname === null, "이름은 아이디로 채우고 닉네임은 비움 · 승인 대기");
+  await call("/api/members/" + p.id, "PATCH", { status: "approved", role: "member" });
+  TOKEN = "";
+  const lg = await call("/api/login", "POST", { login_id: "onlyid", password: "abcd" });
+  ok(lg.me.role === "member", "마스터가 정회원으로 승인 → 로그인");
+  TOKEN = lg.token;
+  r = await call("/api/me", "PATCH", { name: "김온리", phone: "010-1111-2222" });
+  ok(r.me.name === "김온리" && r.me.phone === "010-1111-2222", "이름·연락처는 나중에 내 정보에서 입력");
+  try { await call("/api/diag"); ok(false, "점검은 마스터만"); } catch (e) { ok(/마스터/.test(e.message), "AI 점검은 마스터만"); }
+  try { await call("/api/members/" + p.id + "/dues", "POST", { paid: true }); ok(false, "회비 기록은 마스터만"); }
+  catch (e) { ok(/마스터/.test(e.message), "회비 기록은 마스터만"); }
+  const plain = (await call("/api/members")).members.find((m) => m.login_id === "onlyid");
+  ok(plain.dues_year === undefined && plain.phone === undefined, "일반 회원에겐 남의 회비·연락처 안 보임");
+  TOKEN = mt;
+}
+
+/* 19. 회비 — 1년에 한 번. 버튼 한 번에 기록, 묻지 않음. 강등은 드물게 마스터가 등급에서 직접 */
+{
+  const year = Number(kst(0).slice(0, 4));
+  let ms = (await call("/api/members")).members;
+  const regular = ms.filter((m) => m.status === "approved" && m.role === "member");
+  const [a] = regular;
+  r = await call(`/api/members/${a.id}/dues`, "POST", { paid: true });
+  ok(r.member.dues_year === year && r.member.role === "member" && !r.promoted, `${year}년 회비 납부 (한 번 누르기)`);
+  r = await call(`/api/members/${a.id}/dues`, "POST", { paid: false });
+  ok(r.member.dues_year === null, "다시 누르면 취소");
+  await call(`/api/members/${a.id}/dues`, "POST", { paid: true });
+
+  ms = (await call("/api/members")).members;
+  const before = ms.filter((m) => m.role === "member").length;
+  ok(before === regular.length, "회비 기록이 없어도 아무도 자동으로 강등되지 않음");
+  try { await call("/api/dues/demote", "POST", {}); ok(false, "일괄 강등 없음"); }
+  catch (e) { ok(/찾을 수 없습니다/.test(e.message), "월 단위 일괄 강등 기능은 없앰"); }
+
+  const g = ms.find((m) => m.role === "guest" && m.status === "approved");
+  r = await call(`/api/members/${g.id}/dues`, "POST", { paid: true });
+  ok(r.promoted && r.member.role === "member", "게스트가 회비를 내면 묻지 않고 정회원으로");
+  await call(`/api/members/${g.id}`, "PATCH", { role: "guest" });
+  ok((await call("/api/members")).members.find((m) => m.id === g.id).role === "guest", "드문 강등은 마스터가 등급에서 직접");
+  r = await call(`/api/members/${g.id}/dues`, "POST", { paid: true, year: year - 1 });
+  ok(!r.promoted, "작년 회비 기록으로는 정회원 안 올라감");
+}
+
+/* 19-2. 지난번 설정 불러오기 */
+{
+  const L = (await call("/api/events")).last;
+  const newest = db.prepare("SELECT place, start_time FROM events ORDER BY id DESC LIMIT 1").get();
+  ok(L && L.event && L.event.place === newest.place && L.event.start_time === newest.start_time, `새 일정 폼에 지난번 일정 불러옴 (${L.event.place} ${L.event.start_time})`);
+  TOKEN = (await call("/api/login", "POST", { login_id: "onlyid", password: "abcd" })).token;
+  ok((await call("/api/events")).last === undefined, "지난 설정은 마스터에게만");
+  TOKEN = (await call("/api/login", "POST", { login_id: "master", password: "1234" })).token;
+}
+
+/* 19-3. 로그인 유지 — 10년 + 쓸 때마다 자동 연장 */
+{
+  const tok = TOKEN;
+  db.prepare("UPDATE sessions SET expires_at = ? WHERE token = ?").run(Date.now() + 5 * 86400000, tok);
+  await call("/api/me");
+  const exp = db.prepare("SELECT expires_at FROM sessions WHERE token = ?").get(tok).expires_at;
+  ok(exp - Date.now() > 3600 * 86400000, "만료가 가까우면 쓰는 순간 10년으로 다시 연장");
+  const t2 = (await call("/api/login", "POST", { login_id: "master", password: "1234" })).token;
+  const exp2 = db.prepare("SELECT expires_at FROM sessions WHERE token = ?").get(t2).expires_at;
+  ok(exp2 - Date.now() > 3600 * 86400000, "새 로그인은 10년 유지");
+}
+
+/* 20. 특별상 (홀인원 · 알바트로스) */
+{
+  const d1 = dateOf(kst(3 * 24 * 60)), d2 = dateOf(kst(10 * 24 * 60));
+  await call("/api/events", "POST", { dates: [d1, d2], start_time: "19:00", place: "특별상 구장" });
+  const evs = (await call("/api/events")).events.filter((e) => e.place === "특별상 구장");
+  const [e1, e2] = evs;
+  r = await call(`/api/events/${e1.id}/jackpots`, "POST", { kind: "hio", amount: 100000, note: "달성자 없으면 이월" });
+  ok(r.event.jackpots.length === 1 && r.event.jackpots[0].label === "홀인원" && r.event.jackpots[0].amount === 100000, "홀인원 특별상 10만원 걸기");
+  await call(`/api/events/${e1.id}/jackpots`, "POST", { kind: "albatross", amount: 50000 });
+  r = await call(`/api/events/${e1.id}/jackpots`, "POST", { kind: "custom", label: "니어핀", amount: 10000 });
+  ok(r.event.jackpots.map((j) => j.label).join(",") === "홀인원,알바트로스,니어핀", "알바트로스 · 직접 입력(니어핀)도 가능");
+  try { await call(`/api/events/${e1.id}/jackpots`, "POST", { kind: "hio" }); ok(false, "상금 없음"); }
+  catch (e) { ok(/상금/.test(e.message), "상금 없이 만들면 거부"); }
+  const listed = (await call("/api/events")).events.find((e) => e.id === e1.id);
+  ok(listed.jackpots.length === 3, "일정 목록에도 특별상이 보임 (신청 전에 알 수 있게)");
+
+  const [hio, alb, near] = r.event.jackpots;
+  const winner = (await call("/api/members")).members.find((m) => m.role === "member");
+  r = await call(`/api/jackpots/${hio.id}`, "PATCH", { winner_id: winner.id, hole_no: 7 });
+  const h1 = r.event.jackpots.find((j) => j.id === hio.id);
+  ok(h1.won_at && h1.winner === (winner.nickname || winner.name) && h1.hole_no === 7, "홀인원 달성자 기록 (7번 홀)");
+  try { await call(`/api/jackpots/${hio.id}/carry`, "POST", {}); ok(false, "달성된 건 이월 불가"); }
+  catch (e) { ok(/달성자가 있는/.test(e.message), "달성자가 있으면 이월 불가"); }
+  try { await call(`/api/jackpots/${alb.id}`, "PATCH", { hole_no: 20, winner_name: "외부인" }); ok(false, "홀 번호"); }
+  catch (e) { ok(/1~18/.test(e.message), "홀 번호는 1~18"); }
+
+  r = await call(`/api/jackpots/${alb.id}/carry`, "POST", { add: 20000 });
+  ok(r.next.id === e2.id, "알바트로스 → 다음 일정으로 이월");
+  const e2d = (await call(`/api/events/${e2.id}`)).event;
+  ok(e2d.jackpots.length === 1 && e2d.jackpots[0].amount === 70000 && /이월/.test(e2d.jackpots[0].note), "이월하면서 상금 5만 → 7만");
+  try { await call(`/api/jackpots/${alb.id}/carry`, "POST", {}); ok(false, "두 번 이월"); }
+  catch (e) { ok(/이미 이월/.test(e.message), "같은 특별상은 한 번만 이월"); }
+
+  r = await call(`/api/jackpots/${near.id}`, "PATCH", { winner_name: "지나가던손님" });
+  ok(r.event.jackpots.find((j) => j.id === near.id).winner === "지나가던손님", "비회원 달성자는 이름으로 기록");
+  const fame = (await call("/api/stats")).jackpots;
+  ok(fame.length === 2 && fame.some((j) => j.label === "홀인원" && j.hole_no === 7), "기록 탭 명예의 전당에 달성 2건");
+
+  r = await call(`/api/jackpots/${near.id}`, "PATCH", { clear_winner: true });
+  ok(!r.event.jackpots.find((j) => j.id === near.id).won_at, "달성 취소");
+  r = await call(`/api/jackpots/${near.id}`, "DELETE", {});
+  ok(r.event.jackpots.length === 2, "특별상 삭제");
+
+  await call(`/api/events/${e2.id}`, "DELETE", {});
+  const e1d = (await call(`/api/events/${e1.id}`)).event;
+  ok(e1d.jackpots.find((j) => j.id === alb.id).carried_to === null, "이월 받은 일정을 지우면 원래 특별상의 이월 표시 해제");
+  ok(db.prepare(`SELECT COUNT(*) c FROM jackpots WHERE event_id = ?`).get(e2.id).c === 0, "지운 일정의 특별상도 삭제");
+  const LJ = (await call("/api/events")).last;
+  ok(LJ.jackpots.hio.amount === 100000 && LJ.jackpots.hio.note === "달성자 없으면 이월" && LJ.jackpots["custom:니어핀"] === undefined, "특별상 폼에 지난번 홀인원 상금·메모 불러옴");
+}
+
+/* 21. AI 점검 (Gemini 키 인식) */
+{
+  const realFetch2 = globalThis.fetch;
+  const keep = env.gemini_api_key;
+  delete env.gemini_api_key;
+  r = await call("/api/diag");
+  ok(r.gemini.ready === false && /GEMINI_API_KEY/.test(r.gemini.error), "키가 없으면 '없음'으로 안내");
+  env.GEMINI_KEY = "x";
+  r = await call("/api/diag");
+  ok(/비슷한 이름/.test(r.gemini.error) && /GEMINI_KEY/.test(r.gemini.error), "이름이 틀린 변수는 알려줌");
+  delete env.GEMINI_KEY;
+
+  env.gemini_api_key = '  "AQ.Ab8RN6-realistic-key-value-1234"\n';
+  let sent = null;
+  globalThis.fetch = async (url, init) => {
+    sent = { url: String(url), key: init.headers["x-goog-api-key"] };
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "생각…", thought: true }, { text: "1" }] } }] }), { status: 200 });
+  };
+  r = await call("/api/diag");
+  ok(r.gemini.ok && r.gemini.model === "gemini-flash-latest" && r.gemini.reply === "1", "소문자 변수(gemini_api_key)도 인식 → 연결 정상");
+  ok(sent.key === "AQ.Ab8RN6-realistic-key-value-1234" && r.gemini.cleaned, "앞뒤 공백·따옴표·줄바꿈은 떼고 보냄");
+  ok(r.gemini.looks_ok && /…/.test(r.gemini.key_hint) && !r.gemini.key_hint.includes("realistic"), "키는 앞뒤 4자만 보여줌 (AQ. 형식도 정상)");
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "API key not valid. Please pass a valid API key." } }), { status: 400 });
+  r = await call("/api/diag");
+  ok(!r.gemini.ok && /키 오류/.test(r.gemini.error), "잘못된 키(400 API key not valid) → '키 오류'로 안내");
+
+  const tried = [];
+  globalThis.fetch = async (url) => {
+    tried.push(String(url).match(/models\/([^:]+)/)[1]);
+    if (tried.length < 3) return new Response(JSON.stringify({ error: { message: "Unknown name thinking" } }), { status: 400 });
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "1" }] } }] }), { status: 200 });
+  };
+  r = await call("/api/diag");
+  ok(r.gemini.ok && tried.length === 3, `모델이 옵션을 거부(400)하면 키 오류가 아니라 다음 모델로 (${tried.join(" → ")})`);
+
+  env.GEMINI_MODEL = " gemini-3.8-flash ";
+  tried.length = 0;
+  globalThis.fetch = async (url) => { tried.push(String(url).match(/models\/([^:]+)/)[1]); return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "1" }] } }] }), { status: 200 }); };
+  r = await call("/api/diag");
+  ok(tried[0] === "gemini-3.8-flash", "GEMINI_MODEL로 모델 고정 가능");
+  delete env.GEMINI_MODEL;
+
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "quota" } }), { status: 429 });
+  r = await call("/api/diag");
+  ok(!r.gemini.ok && /한도/.test(r.gemini.error), "무료 한도 초과는 따로 안내");
+  globalThis.fetch = realFetch2;
+  env.gemini_api_key = keep;
+}
+
+/* 22. reset.sql — 실제 회원은 절대 건드리지 않음 (테스트 표시 계정만 정리) */
+{
+  const before = db.prepare(`SELECT COUNT(*) c FROM members WHERE IFNULL(memo, '') <> '__TEST__'`).get().c;
+  const evs = db.prepare(`SELECT COUNT(*) c FROM events`).get().c;
+  const sess = db.prepare(`SELECT COUNT(*) c FROM sessions`).get().c;
+  db.exec(`INSERT INTO members (login_id, name, pw_hash, pw_salt, role, status, memo, created_at) VALUES ('zz_test', 'x', 'h', 's', 'member', 'approved', '__TEST__', 't')`);
+  db.exec(readFileSync("./reset.sql", "utf8").replace(/\n/g, " "));
+  ok(db.prepare(`SELECT COUNT(*) c FROM members`).get().c === before, `실제 회원 ${before}명 그대로`);
+  ok(db.prepare(`SELECT COUNT(*) c FROM members WHERE memo = '__TEST__'`).get().c === 0, "테스트 표시 계정만 삭제");
+  ok(db.prepare(`SELECT COUNT(*) c FROM events`).get().c === evs, "일정·기록 그대로");
+  ok(db.prepare(`SELECT COUNT(*) c FROM sessions`).get().c === sess, "로그인 상태 그대로 (아무도 로그아웃 안 됨)");
 }
 
 console.log("\n모든 테스트 통과");

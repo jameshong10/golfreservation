@@ -37,7 +37,26 @@ const S = {
   testBusy: false,
   features: {}, // { jev, ocr } — 마스터에게만 옴
   chat: null, // 카톡 대화 읽기: null | { text, busy, people }
+  calMonth: null, // 달력에 보이는 달 'YYYY-MM' (null이면 자동)
+  calEvents: [], // 이번 달 1일부터의 일정 (지난 날 포함, 달력용)
+  newDate: null, // 달력에서 빈 날짜를 눌러 새 일정 만들 때
+  last: null, // 지난번 설정 (새 일정 · 특별상 폼 미리 채우기) — 마스터에게만 옴
+  jpAdd: false, // 특별상 추가 폼
+  jpWin: null, // 달성자 기록 중인 특별상 id
+  diag: null, // AI 점검 결과 | "busy"
 };
+
+/** 오늘 (KST, YYYY-MM-DD) */
+const todayStr = () => new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+/** 'YYYY-MM' + n개월 */
+function shiftMonth(ym, n) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
+}
+
+/** 올해 (KST) — 회비는 1년에 한 번 */
+const thisYear = () => Number(new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 4));
+const JP_KIND = { hio: "홀인원", albatross: "알바트로스", custom: "직접 입력" };
 
 const svg = (d) =>
   `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
@@ -74,7 +93,9 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if (res.status === 401 && S.token) signOut(true);
-    throw new Error(data.error || "요청을 처리하지 못했습니다.");
+    const err = new Error(data.error || "요청을 처리하지 못했습니다.");
+    err.status = res.status;
+    throw err;
   }
   return data;
 }
@@ -231,13 +252,16 @@ function gateHTML() {
       <div class="sub">${reg ? "가입 신청 후 마스터가 승인하면 사용할 수 있습니다." : "스크린골프 동호회 예약 · 방배정 · 기록"}</div>
     </div>
     <div class="card">
-      <div class="field"><label for="gid">아이디</label><input id="gid" autocomplete="username"></div>
-      ${reg ? `<div class="field"><label for="gname">이름</label><input id="gname" autocomplete="name"></div>
-      <div class="field"><label for="gnick">닉네임</label><input id="gnick" maxlength="20" placeholder="골프존 닉네임과 똑같이">
-        <div class="hint">대회 결과 사진에서 이 닉네임으로 기록을 찾습니다. 나중에 내 정보에서 바꿀 수 있습니다.</div></div>
-      <div class="field"><label for="gphone">연락처</label><input id="gphone" inputmode="tel" placeholder="010-0000-0000"></div>` : ""}
-      <div class="field"><label for="gpw">비밀번호</label><input id="gpw" type="password" autocomplete="${reg ? "new-password" : "current-password"}"></div>
-      ${reg ? `<div class="field"><label for="gmemo">마스터에게 남길 말</label><input id="gmemo" placeholder="예: 김OO 소개"></div>` : ""}
+      <div class="field"><label for="gid">아이디</label><input id="gid" autocomplete="username" autocapitalize="none"></div>
+      <div class="field"><label for="gpw">비밀번호</label><input id="gpw" type="password" autocomplete="${reg ? "new-password" : "current-password"}">
+        ${reg ? '<div class="hint">4자 이상. 아이디와 비밀번호만 있으면 신청됩니다.</div>' : ""}</div>
+      ${reg ? `<div class="opt-h">아래는 선택 사항입니다 (나중에 내 정보에서 적어도 됩니다)</div>
+      <div class="field"><label for="gnick">닉네임 <span class="opt">선택</span></label><input id="gnick" maxlength="20" placeholder="골프존 닉네임과 똑같이">
+        <div class="hint">대회 결과 사진에서 이 닉네임으로 기록을 찾습니다.</div></div>
+      <div class="field"><label for="gname">이름 <span class="opt">선택</span></label><input id="gname" autocomplete="name"></div>
+      <div class="field"><label for="gphone">연락처 <span class="opt">선택</span></label><input id="gphone" inputmode="tel" placeholder="010-0000-0000"></div>
+      <div class="field"><label for="gmemo">마스터에게 남길 말 <span class="opt">선택</span></label><input id="gmemo" placeholder="예: 김OO 소개"></div>
+      <div class="hint warn">가입 신청 후 <b>마스터가 정회원 또는 게스트로 승인</b>해야 로그인할 수 있습니다.</div>` : ""}
       <button class="btn wide" id="gsubmit">${reg ? "가입 신청하기" : "로그인"}</button>
     </div>
     <div class="switch">
@@ -279,6 +303,7 @@ function bindGate() {
         S.me = r.me;
         S.features = {};
         localStorage.setItem("sg_token", r.token);
+        localStorage.setItem("sg_me", JSON.stringify(r.me));
         render();
         loadAll();
       }
@@ -369,6 +394,8 @@ function scheduleHTML() {
       .join("");
   }
 
+  html += calendarHTML(master);
+
   if (master) {
     html += S.showNewEvent
       ? eventFormHTML(null)
@@ -391,6 +418,59 @@ function scheduleHTML() {
   return html;
 }
 
+/* ---------- 작은 달력 ---------- */
+
+function calendarHTML(master) {
+  const today = todayStr();
+  const cur = today.slice(0, 7);
+  const all = S.calEvents || [];
+  // 처음엔 가장 가까운 모임이 있는 달을 보여준다
+  let ym = S.calMonth;
+  if (!ym) ym = S.events.length ? S.events[0].event_date.slice(0, 7) : cur;
+  const lastEv = all.length ? all[all.length - 1].event_date.slice(0, 7) : cur;
+  const maxYm = master ? shiftMonth(cur, 6) : lastEv > cur ? lastEv : cur;
+
+  const byDate = {};
+  for (const e of all) (byDate[e.event_date] = byDate[e.event_date] || []).push(e);
+
+  const [y, m] = ym.split("-").map(Number);
+  const lead = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  let cells = "";
+  for (let i = 0; i < lead; i++) cells += `<span class="cal-d blank"></span>`;
+  for (let d = 1; d <= days; d++) {
+    const date = `${ym}-${String(d).padStart(2, "0")}`;
+    const evs = byDate[date] || [];
+    const dow = (lead + d - 1) % 7;
+    const mine = evs.some((e) => e.my_status === "yes" || e.my_status === "wait");
+    const past = date < today;
+    const cls = [
+      "cal-d",
+      dow === 0 ? "sun" : dow === 6 ? "sat" : "",
+      date === today ? "today" : "",
+      evs.length ? "has" : "",
+      mine ? "mine" : "",
+      past ? "past" : "",
+    ].join(" ");
+    const clickable = evs.length || (master && !past);
+    cells += `<button class="${cls}" ${clickable ? `data-cal="${date}"` : "disabled"} aria-label="${m}월 ${d}일${evs.length ? " 모임 " + evs[0].start_time : ""}">
+      <span class="n">${d}</span>${evs.length ? `<span class="t">${esc(evs[0].start_time)}</span>` : ""}
+    </button>`;
+  }
+  return `<section class="card cal">
+    <div class="cal-h">
+      <button class="cal-nav" data-calnav="-1" ${ym <= cur ? "disabled" : ""} aria-label="이전 달">‹</button>
+      <b>${y}년 ${m}월</b>
+      <button class="cal-nav" data-calnav="1" ${ym >= maxYm ? "disabled" : ""} aria-label="다음 달">›</button>
+    </div>
+    <div class="cal-w">${DOW.map((w, i) => `<span class="${i === 0 ? "sun" : i === 6 ? "sat" : ""}">${w}</span>`).join("")}</div>
+    <div class="cal-g">${cells}</div>
+    <div class="cal-legend"><span><i class="dot has"></i>모임</span><span><i class="dot mine"></i>내가 참가</span>${
+      master ? `<span class="sub">빈 날짜를 누르면 새 일정</span>` : ""
+    }</div>
+  </section>`;
+}
+
 function countsLine(ev) {
   const bits = [`참가 ${ev.yes_count}`];
   if (ev.hold_count) bits.push(`보류 ${ev.hold_count}`);
@@ -408,6 +488,7 @@ function eventCardHTML(ev, isNext) {
     </div>
     ${ev.place || ev.title ? `<div class="meta">${esc([ev.place, ev.title].filter(Boolean).join(" · "))}</div>` : ""}
     <div class="meta">${countsLine(ev)}</div>
+    ${jackpotLine(ev)}
     ${isNext ? statusBarHTML(ev) : ""}
     <div class="rsvp-wrap">${rsvpHTML(ev, isNext)}</div>
   </article>`;
@@ -422,24 +503,37 @@ function roomPlan(n) {
 }
 
 /** ev가 null이면 새 일정 만들기, 있으면 수정 */
+/** 새 일정 기본 날짜: 지난 일정과 같은 요일 중 오늘 이후 가장 가까운 날 */
+function nextSameWeekday(lastDate) {
+  const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  if (!lastDate) return today;
+  const want = new Date(lastDate + "T00:00:00Z").getUTCDay();
+  let d = new Date(today + "T00:00:00Z");
+  while (d.getUTCDay() !== want) d = new Date(d.getTime() + 86400000);
+  return d.toISOString().slice(0, 10);
+}
+
 function eventFormHTML(ev) {
   const edit = !!ev;
-  const d = edit ? ev.event_date : new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
-  const rc = edit ? ev.rooms_count : MAX_ROOMS;
+  // 새로 만들 때는 지난번 일정 설정을 그대로 불러온다
+  const L = (!edit && S.last && S.last.event) || null;
+  const src = edit ? ev : L || {};
+  const d = edit ? ev.event_date : S.newDate || nextSameWeekday(L && L.event_date);
+  const rc = src.rooms_count || MAX_ROOMS;
   return `
   <section class="card">
     <h2>${edit ? "일정 수정" : "새 일정 만들기"}</h2>
     <div class="row2">
       <div class="field"><label for="nDate">날짜</label><input id="nDate" type="date" value="${d}"></div>
-      <div class="field"><label for="nTime">시작 시각</label><input id="nTime" type="time" step="600" value="${edit ? esc(ev.start_time) : "19:00"}"></div>
+      <div class="field"><label for="nTime">시작 시각</label><input id="nTime" type="time" step="600" value="${esc(src.start_time || "19:00")}"></div>
     </div>
     <div class="row2">
-      <div class="field"><label for="nPlace">구장</label><input id="nPlace" placeholder="OO스크린골프" value="${edit ? esc(ev.place || "") : ""}"></div>
-      <div class="field"><label for="nTitle">모임 이름</label><input id="nTitle" placeholder="정기 라운드 / 월례회" value="${edit ? esc(ev.title || "") : ""}"></div>
+      <div class="field"><label for="nPlace">구장</label><input id="nPlace" placeholder="OO스크린골프" value="${esc(src.place || "")}"></div>
+      <div class="field"><label for="nTitle">모임 이름</label><input id="nTitle" placeholder="정기 라운드 / 월례회" value="${esc(src.title || "")}"></div>
     </div>
     <div class="field">
       <label for="nFee">1인 참가비</label>
-      <input id="nFee" inputmode="numeric" value="${edit ? ev.entry_fee : 4000}">
+      <input id="nFee" inputmode="numeric" value="${src.entry_fee != null ? src.entry_fee : 4000}">
       <div class="hint">참가비 총액을 방배정 때 1등부터 차등(랜덤)으로 시상 금액에 배정합니다. 참가자 절반까지 시상.</div>
     </div>
     <div class="field">
@@ -466,8 +560,9 @@ function eventFormHTML(ev) {
           </div>`
     }
     <div class="field">
-      <label><input type="checkbox" id="nSpread" ${!edit || ev.spread_guests ? "checked" : ""} style="width:auto;margin-right:6px">게스트를 방마다 고르게 나누기</label>
+      <label><input type="checkbox" id="nSpread" ${src.spread_guests === 0 ? "" : "checked"} style="width:auto;margin-right:6px">게스트를 방마다 고르게 나누기</label>
     </div>
+    ${L ? `<div class="hint" style="margin-bottom:12px">지난번 일정(${fmtDate(L.event_date)}) 설정을 불러왔습니다. 바꿀 것만 고치세요.</div>` : ""}
     ${edit ? `<div class="hint" style="margin-bottom:12px">시각을 바꾸면 이미 배정된 방은 지워지고 새 시각 20분 전에 다시 배정됩니다.</div>` : ""}
     <div class="btn-row">
       <button class="btn" id="${edit ? "updateEvent" : "saveEvent"}">${edit ? "저장" : "만들기"}</button>
@@ -558,6 +653,7 @@ function eventHTML() {
           </div>
           ${ev.place || ev.title ? `<div class="meta">${esc([ev.place, ev.title].filter(Boolean).join(" · "))}</div>` : ""}
           <div class="meta">${countsLine(ev)}</div>
+          ${jackpotLine(ev)}
           ${statusBarHTML(ev)}
           ${
             ev.my_dropped && ev.phase !== "open"
@@ -601,6 +697,7 @@ function eventHTML() {
   </section>
 
   ${prizeHTML(ev, master)}
+  ${jackpotHTML(ev, master)}
   ${resultsHTML(ev, master)}
 
   ${
@@ -753,6 +850,7 @@ function assignText(ev) {
     ev.prize.amounts.forEach((a, i) => lines.push(`${i + 1}등 ${won(a)}`));
     lines.push(`※ 공동 순위는 해당 순위 상금을 합쳐 나눕니다.`);
   }
+  lines.push(...jackpotText(ev));
   return lines.filter((x) => x !== undefined).join("\n");
 }
 
@@ -793,6 +891,99 @@ function prizeHTML(ev, master) {
         : ""
     }
   </section>`;
+}
+
+/* ---------- 특별상 (홀인원 · 알바트로스) ---------- */
+
+function jackpotLine(ev) {
+  const list = (ev.jackpots || []).filter((j) => !j.carried_to);
+  if (!list.length) return "";
+  return `<div class="jp-line">${list
+    .map((j) =>
+      j.won_at
+        ? `<span class="jp-pill won">🎉 ${esc(j.winner)} ${esc(j.label)} 달성!</span>`
+        : `<span class="jp-pill">🎯 ${esc(j.label)} ${won(j.amount)}</span>`
+    )
+    .join("")}</div>`;
+}
+
+function jackpotHTML(ev, master) {
+  const list = ev.jackpots || [];
+  if (!list.length && !master) return "";
+  const started = Date.now() >= ev.start_ts;
+  const item = (j) => {
+    const status = j.won_at
+      ? `<div class="jp-win">🎉 달성: <b>${esc(j.winner)}</b>${j.hole_no ? ` · ${j.hole_no}번 홀` : ""}</div>`
+      : j.carried_to
+      ? `<div class="sub">달성자 없음 → 다음 일정으로 이월했습니다</div>`
+      : `<div class="sub">${started ? "달성자가 있으면 기록해 주세요." : "이번 대회에서 달성하면 상금을 드립니다."}</div>`;
+    let acts = "";
+    if (master) {
+      if (S.jpWin === j.id)
+        acts = `<div class="alias-panel" style="margin-top:8px">
+          <label class="sub">달성한 회원</label>
+          <select id="jpWinMember">${memberOptions(null)}</select>
+          <input id="jpWinName" placeholder="비회원이면 이름 적기" style="margin-top:6px">
+          <input id="jpWinHole" type="number" inputmode="numeric" min="1" max="18" placeholder="홀 번호 (선택)" style="margin-top:6px">
+          <div class="btn-row"><button class="btn sm" id="jpWinSave" data-id="${j.id}">달성 기록</button><button class="btn sm ghost" id="jpWinCancel">닫기</button></div>
+        </div>`;
+      else
+        acts = `<div class="btn-row">
+          ${
+            j.won_at
+              ? `<button class="btn sm ghost" data-jpclear="${j.id}">달성 취소</button>`
+              : j.carried_to
+              ? ""
+              : `<button class="btn sm" data-jpwin="${j.id}">달성자 기록</button>
+                 <button class="btn sm ghost" data-jpcarry="${j.id}">다음 일정으로 이월</button>`
+          }
+          <button class="btn sm ghost" data-jpamt="${j.id}" data-cur="${j.amount}">금액</button>
+          <button class="btn sm danger" data-jpdel="${j.id}">삭제</button>
+        </div>`;
+    }
+    return `<div class="jp ${j.won_at ? "won" : ""} ${j.carried_to ? "carried" : ""}">
+      <div class="jp-h"><b>${esc(j.label)}</b><span class="jp-amt">${won(j.amount)}</span></div>
+      ${j.note ? `<div class="sub">${esc(j.note)}</div>` : ""}
+      ${status}
+      ${acts}
+    </div>`;
+  };
+  return `<section class="card jackpot" style="margin-top:22px">
+    <h2>🎯 특별상</h2>
+    ${list.length ? list.map(item).join("") : `<div class="hint">홀인원·알바트로스처럼 특별한 기록에 따로 상금을 걸 수 있습니다.</div>`}
+    ${
+      master
+        ? S.jpAdd
+          ? `<div class="alias-panel" style="margin-top:10px">
+              <label class="sub">종류</label>
+              ${(() => {
+                const k0 = (S.last && S.last.jackpot_kind) || "hio";
+                const d0 = jpDefault(k0 === "custom" ? null : k0) || {};
+                return `<select id="jpKind">${Object.entries(JP_KIND)
+                  .map(([k, l]) => `<option value="${k}" ${k === (k0 === "custom" ? "hio" : k0) ? "selected" : ""}>${l}</option>`)
+                  .join("")}</select>
+              <input id="jpLabel" placeholder="이름 (직접 입력일 때, 예: 이글 · 니어핀)" style="margin-top:6px;display:none">
+              <input id="jpAmount" type="number" inputmode="numeric" placeholder="상금 (원)" style="margin-top:6px" value="${d0.amount || ""}">
+              <input id="jpNote" placeholder="메모 (선택, 예: 달성자 없으면 다음 대회로 이월)" style="margin-top:6px" value="${esc(d0.note || "")}">`;
+              })()}
+              <div class="btn-row"><button class="btn sm" id="jpSave">특별상 걸기</button><button class="btn sm ghost" id="jpCancel">닫기</button></div>
+            </div>`
+          : `<div class="btn-row"><button class="btn sm ghost" id="jpOpen">+ 특별상 걸기</button></div>`
+        : ""
+    }
+  </section>`;
+}
+
+/** 지난번에 같은 종류로 걸었던 상금·메모 */
+function jpDefault(kind, label) {
+  const J = (S.last && S.last.jackpots) || {};
+  return kind === "custom" ? J["custom:" + label] : J[kind];
+}
+
+function jackpotText(ev) {
+  const list = (ev.jackpots || []).filter((j) => !j.carried_to && !j.won_at);
+  if (!list.length) return [];
+  return ["", "🎯 특별상", ...list.map((j) => `${j.label} ${won(j.amount)}${j.note ? " (" + j.note + ")" : ""}`)];
 }
 
 /* ---------- 대회 결과 ---------- */
@@ -907,6 +1098,7 @@ function shareText(ev) {
     `마감 후에는 대기 신청만 가능하고, 방이 확보되는 대로 확정합니다.`,
     ``,
     `현재 참가 ${ev.yes_count} · 보류 ${ev.hold_count} · 대기 ${ev.wait_count}`,
+    ...jackpotText(ev),
   ];
   return lines.filter((x) => x !== undefined).join("\n");
 }
@@ -1064,7 +1256,7 @@ function memberRowHTML(m, master) {
   const canDel = master && m.id !== S.me.id && !isAdmin(m);
   const tags = `${m.is_test ? '<span class="tag ok">테스트</span>' : ""}${
     master && m.activity === 0 ? ' <span class="tag">활동 없음</span>' : ""
-  }`;
+  }${master ? duesTag(m) : ""}`;
   return `<div class="mrow ${S.selMode && S.sel.has(m.id) ? "picked" : ""}">
     ${
       master && S.selMode
@@ -1075,7 +1267,7 @@ function memberRowHTML(m, master) {
       <div class="nm">${esc(nm(m))} <span class="role-pill ${m.role}">${ROLE_LABEL[m.role]}</span> ${tags}</div>
       ${
         master
-          ? `<div class="sub">${esc(m.name)} · ${esc(m.login_id)}${m.phone ? " · " + esc(m.phone) : ""}${
+          ? `<div class="sub">${m.name && m.name !== m.login_id ? esc(m.name) + " · " : ""}${esc(m.login_id)}${m.phone ? " · " + esc(m.phone) : ""}${
               m.gz_mask ? " · 골프존 " + esc(m.gz_mask) : ""
             }${m.nickname ? "" : ' · <span style="color:var(--flag)">닉네임 없음</span>'}</div>`
           : ""
@@ -1089,6 +1281,13 @@ function memberRowHTML(m, master) {
                 .map((r) => `<option value="${r}" ${m.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`)
                 .join("")}
             </select>
+            ${
+              isAdmin(m)
+                ? ""
+                : `<button class="btn sm ${m.dues_year >= thisYear() ? "" : "ghost"}" data-dues="${m.id}" data-paid="${m.dues_year >= thisYear() ? 1 : 0}">${
+                    m.dues_year >= thisYear() ? "✓ " + thisYear() + " 회비" : thisYear() + " 회비"
+                  }</button>`
+            }
             <button class="btn sm ghost" data-nick="${m.id}" data-cur="${esc(m.nickname || "")}">닉네임</button>
             <button class="btn sm ghost" data-alias="${m.id}">인식</button>
             ${m.id !== S.me.id ? `<button class="btn sm danger" data-block="${m.id}">정지</button>` : ""}
@@ -1097,7 +1296,15 @@ function memberRowHTML(m, master) {
         : ""
     }
   </div>
-  ${master && S.aliasOpen === m.id && !S.selMode ? aliasPanelHTML(m) : ""}`;
+  ${master && S.aliasOpen === m.id && !S.selMode ? aliasPanelHTML(m) : ""}
+`;
+}
+
+/* ---------- 회비 (1년에 한 번) ---------- */
+
+function duesTag(m) {
+  if (isAdmin(m) || !(m.dues_year >= thisYear())) return "";
+  return ` <span class="tag ok">${String(thisYear()).slice(2)}년 회비</span>`;
 }
 
 function aliasPanelHTML(m) {
@@ -1141,29 +1348,73 @@ function testToolsHTML() {
 /* ---------- 내 정보 ---------- */
 
 function myHTML() {
+  const me = S.me;
+  const y = thisYear();
+  const dues =
+    (me.role === "member" || me.role === "guest") && me.dues_year >= y
+      ? `<div class="meta">${y}년 회비 납부 완료</div>`
+      : "";
   return `
   <section class="card">
     <h2>내 정보</h2>
-    <div class="meta">로그인 아이디 ${esc(S.me.login_id)}</div>
-    <div class="meta">이름 ${esc(S.me.name)}</div>
-    ${S.me.gz_mask ? `<div class="meta">골프존 결과표 아이디 ${esc(S.me.gz_mask)}</div>` : ""}
-    <div class="meta">연락처 ${esc(S.me.phone || "-")}</div>
-    <div class="meta">등급 ${ROLE_LABEL[S.me.role]}</div>
+    <div class="meta">로그인 아이디 ${esc(me.login_id)}</div>
+    ${me.gz_mask ? `<div class="meta">골프존 결과표 아이디 ${esc(me.gz_mask)}</div>` : ""}
+    <div class="meta">등급 ${ROLE_LABEL[me.role]}</div>
+    ${dues}
   </section>
-  <section class="card${S.me.nickname ? "" : " next"}">
+  <section class="card${me.nickname ? "" : " next"}">
     <h2>닉네임</h2>
     <div class="field">
-      <input id="myNick" maxlength="20" value="${esc(S.me.nickname || "")}" placeholder="골프존 닉네임과 똑같이">
+      <input id="myNick" maxlength="20" value="${esc(me.nickname || "")}" placeholder="골프존 닉네임과 똑같이">
       <div class="hint">골프존에서 닉네임을 바꾸면 여기서도 똑같이 바꿔주세요. 대회 결과 사진에서 이 닉네임으로 내 기록을 찾습니다.
       예전 닉네임은 자동으로 기억해 두어 지난 기록은 그대로 이어집니다. 로그인 아이디는 바뀌지 않습니다.</div>
     </div>
     <button class="btn" id="nickSave">닉네임 저장</button>
   </section>
   <section class="card">
+    <h2>이름 · 연락처 <span class="opt">선택</span></h2>
+    <div class="field"><label for="myName">이름</label><input id="myName" value="${esc(me.name === me.login_id ? "" : me.name || "")}"></div>
+    <div class="field"><label for="myPhone">연락처</label><input id="myPhone" inputmode="tel" value="${esc(me.phone || "")}" placeholder="010-0000-0000"></div>
+    <button class="btn ghost" id="profileSave">저장</button>
+  </section>
+  <section class="card">
     <h2>비밀번호 바꾸기</h2>
     <div class="field"><label for="pwCur">현재 비밀번호</label><input id="pwCur" type="password"></div>
     <div class="field"><label for="pwNew">새 비밀번호</label><input id="pwNew" type="password"></div>
     <button class="btn" id="pwSave">바꾸기</button>
+  </section>
+  ${isAdmin(me) ? diagHTML() : ""}`;
+}
+
+/** AI 연결 점검 (마스터·개발자) */
+function diagHTML() {
+  const d = S.diag;
+  let body = "";
+  if (d === "busy") body = `<div class="meta">점검 중… (5~15초)</div>`;
+  else if (d && d.gemini) {
+    const g = d.gemini;
+    body += `<div class="diag-row ${g.ok ? "good" : "bad"}">
+      <b>${g.ok ? "✅" : "❌"} Gemini (결과 사진 인식)</b>
+      ${
+        g.ok
+          ? `<div class="sub">정상 연결 · 모델 ${esc(g.model)} · ${g.ms}ms</div>`
+          : `<div class="sub">${esc(g.error || "연결 실패")}</div>`
+      }
+      ${g.var_name ? `<div class="sub">변수 ${esc(g.var_name)} · 키 ${esc(g.key_hint)}${g.cleaned ? " · 앞뒤 공백/따옴표를 떼고 사용 중" : ""}</div>` : ""}
+      ${g.ready && !g.looks_ok ? `<div class="sub" style="color:var(--flag)">키가 너무 짧거나 중간에 공백이 있습니다. Google AI Studio에서 키를 다시 복사해 넣으세요.</div>` : ""}
+      ${g.model_setting ? `<div class="sub">GEMINI_MODEL 지정: ${esc(g.model_setting)}</div>` : ""}
+    </div>
+    <div class="diag-row ${d.jev.ready ? "good" : ""}"><b>${d.jev.ready ? "✅" : "➖"} Jev (카톡 대화 읽기)</b>
+      <div class="sub">${d.jev.ready ? "TYPESAFE_API_KEY 설정됨" : "키 없음 — 카톡 대화 읽기 기능만 꺼집니다"}</div></div>`;
+    if (!g.ok)
+      body += `<div class="hint warn">키를 고친 뒤에는 <b>Pages 배포를 한 번 다시</b> 해야 반영됩니다.
+      변수 유형은 반드시 <b>'비밀(Secret)'</b>로 넣으세요 — 이 프로젝트는 wrangler.toml을 쓰기 때문에 일반 텍스트 변수는 무시됩니다.</div>`;
+  }
+  return `<section class="card tools">
+    <h2>🔧 AI 연결 점검</h2>
+    <div class="hint">결과 사진 인식(Gemini) 키가 제대로 들어가 있는지 실제로 한 번 물어봐서 확인합니다.</div>
+    ${body}
+    <div class="btn-row"><button class="btn sm" id="diagRun" ${d === "busy" ? "disabled" : ""}>점검하기</button></div>
   </section>`;
 }
 
@@ -1198,6 +1449,50 @@ function bindBody() {
   });
 
   bindMemberTools(on, bind);
+  bindDues(on);
+
+  on("[data-calnav]", (e) => {
+    const cur = todayStr().slice(0, 7);
+    const base = S.calMonth || (S.events.length ? S.events[0].event_date.slice(0, 7) : cur);
+    S.calMonth = shiftMonth(base, Number(e.currentTarget.dataset.calnav));
+    renderBody();
+  });
+  on("[data-cal]", (e) => {
+    const date = e.currentTarget.dataset.cal;
+    const evs = (S.calEvents || []).filter((x) => x.event_date === date);
+    if (evs.length) return openEvent(evs[0].id);
+    if (isAdmin(S.me)) {
+      S.newDate = date;
+      S.showNewEvent = true;
+      renderBody();
+      const f = $("nDate");
+      if (f && f.scrollIntoView) f.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  });
+  bindJackpots(on, bind);
+
+  bind("profileSave", async () => {
+    try {
+      const r = await api("/me", { method: "PATCH", body: { name: $("myName").value.trim(), phone: $("myPhone").value.trim() } });
+      S.me = r.me;
+      render();
+      toast("저장했습니다.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  bind("diagRun", async () => {
+    S.diag = "busy";
+    renderBody();
+    try {
+      S.diag = await api("/diag");
+    } catch (err) {
+      S.diag = null;
+      toast(err.message, true);
+    }
+    renderBody();
+  });
 
   on("[data-nick]", async (e) => {
     const b = e.currentTarget;
@@ -1282,6 +1577,7 @@ function bindBody() {
     renderBody();
   });
   bind("cancelForm", () => {
+    S.newDate = null;
     S.showNewEvent = false;
     S.showEditEvent = false;
     renderBody();
@@ -1526,6 +1822,7 @@ async function createEvent() {
       },
     });
     S.showNewEvent = false;
+    S.newDate = null;
     await loadEvents();
     renderBody();
     toast(`일정 ${r.created}건을 만들었습니다.`);
@@ -1810,6 +2107,18 @@ function recordsHTML() {
         .join("")}</div></section>`;
   }
 
+  if (st.jackpots && st.jackpots.length && S.recView === "rank")
+    html += `<section class="card jackpot">
+      <h2>🏅 명예의 전당</h2>
+      <ul class="fame">${st.jackpots
+        .map(
+          (j) => `<li><span class="fd">${fmtDate(j.event_date)}</span>
+          <b>${esc(j.winner || "?")}</b> ${esc(j.label)}${j.hole_no ? ` (${j.hole_no}번 홀)` : ""}
+          <span class="jp-amt">${won(j.amount)}</span></li>`
+        )
+        .join("")}</ul>
+    </section>`;
+
   if (!st.events.length) return html + `<div class="empty">아직 저장된 대회 결과가 없습니다.</div>`;
 
   if (S.recView === "rank") {
@@ -2069,10 +2378,154 @@ function bindMemberTools(on, bind) {
   });
 }
 
+/* ---------- 회비 · 특별상 이벤트 ---------- */
+
+function bindDues(on) {
+  // 한 번 누르면 올해 회비 납부, 다시 누르면 취소. 묻지 않는다
+  on("[data-dues]", async (e) => {
+    const b = e.currentTarget;
+    const paid = b.dataset.paid !== "1";
+    b.disabled = true;
+    try {
+      const r = await api(`/members/${b.dataset.dues}/dues`, { method: "POST", body: { paid } });
+      const i = S.members.findIndex((m) => m.id === r.member.id);
+      const fresh = Object.fromEntries(Object.entries(r.member).filter(([, v]) => v !== undefined));
+      if (i >= 0) S.members[i] = { ...S.members[i], ...fresh };
+      renderBody();
+      if (r.promoted) toast(`${nm(r.member)} 님을 정회원으로 올렸습니다.`);
+    } catch (err) {
+      toast(err.message, true);
+      b.disabled = false;
+    }
+  });
+}
+
+function bindJackpots(on, bind) {
+  const after = async (r) => {
+    S.detail = r.event;
+    await loadEvents();
+    renderBody();
+  };
+  bind("jpOpen", () => {
+    S.jpAdd = true;
+    renderBody();
+  });
+  bind("jpCancel", () => {
+    S.jpAdd = false;
+    renderBody();
+  });
+  const fillJp = (d) => {
+    if (!d) return;
+    $("jpAmount").value = d.amount || "";
+    $("jpNote").value = d.note || "";
+  };
+  bind(
+    "jpKind",
+    (e) => {
+      const k = e.target.value;
+      $("jpLabel").style.display = k === "custom" ? "block" : "none";
+      if (k !== "custom") fillJp(jpDefault(k));
+    },
+    "change"
+  );
+  bind(
+    "jpLabel",
+    (e) => fillJp(jpDefault("custom", e.target.value.trim())),
+    "change"
+  );
+  bind("jpSave", async () => {
+    const kind = $("jpKind").value;
+    const label = kind === "custom" ? $("jpLabel").value.trim() : JP_KIND[kind];
+    if (kind === "custom" && !label) return toast("특별상 이름을 적어주세요.", true);
+    if (!Number($("jpAmount").value)) return toast("상금을 입력하세요.", true);
+    try {
+      const r = await api(`/events/${S.eventId}/jackpots`, {
+        method: "POST",
+        body: { kind, label, amount: $("jpAmount").value, note: $("jpNote").value.trim() },
+      });
+      S.jpAdd = false;
+      await after(r); // loadEvents가 지난 설정도 새로 받아옴
+      toast(`${label} 특별상을 걸었습니다.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-jpwin]", (e) => {
+    S.jpWin = Number(e.currentTarget.dataset.jpwin);
+    renderBody();
+  });
+  bind("jpWinCancel", () => {
+    S.jpWin = null;
+    renderBody();
+  });
+  bind("jpWinSave", async (e) => {
+    const body = {
+      winner_id: $("jpWinMember").value || null,
+      winner_name: $("jpWinName").value.trim(),
+      hole_no: $("jpWinHole").value,
+    };
+    if (!body.winner_id && !body.winner_name) return toast("달성한 회원을 고르거나 이름을 적으세요.", true);
+    try {
+      const r = await api(`/jackpots/${e.currentTarget.dataset.id}`, { method: "PATCH", body });
+      S.jpWin = null;
+      S.stats = null;
+      await after(r);
+      toast("🎉 달성을 기록했습니다!");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-jpclear]", async (e) => {
+    if (!confirm("달성 기록을 지웁니다. 진행할까요?")) return;
+    try {
+      S.stats = null;
+      await after(await api(`/jackpots/${e.currentTarget.dataset.jpclear}`, { method: "PATCH", body: { clear_winner: true } }));
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-jpamt]", async (e) => {
+    const b = e.currentTarget;
+    const v = prompt("상금을 얼마로 바꿀까요? (원)", b.dataset.cur);
+    if (v == null) return;
+    try {
+      await after(await api(`/jackpots/${b.dataset.jpamt}`, { method: "PATCH", body: { amount: v.replace(/[^0-9]/g, "") } }));
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-jpcarry]", async (e) => {
+    const v = prompt("달성자가 없어 다음 일정으로 넘깁니다.\n상금을 더 올리려면 추가할 금액을 적으세요. (없으면 0)", "0");
+    if (v == null) return;
+    try {
+      const r = await api(`/jackpots/${e.currentTarget.dataset.jpcarry}/carry`, {
+        method: "POST",
+        body: { add: v.replace(/[^0-9]/g, "") },
+      });
+      await after(r);
+      toast(`${fmtDate(r.next.event_date)} ${r.next.start_time} 일정으로 이월했습니다.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  on("[data-jpdel]", async (e) => {
+    if (!confirm("이 특별상을 삭제합니다. 진행할까요?")) return;
+    try {
+      await after(await api(`/jackpots/${e.currentTarget.dataset.jpdel}`, { method: "DELETE", body: {} }));
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+}
+
 /* ---------- 데이터 로딩 ---------- */
 
 async function loadEvents() {
-  S.events = (await api("/events")).events;
+  const today = todayStr();
+  const r = await api(`/events?from=${today.slice(0, 8)}01`); // 이번 달 지난 모임도 달력에 보이게
+  S.calEvents = r.events;
+  S.events = r.events.filter((e) => e.event_date >= today); // 목록은 오늘부터
+  if (r.last) S.last = r.last;
 }
 async function loadMembers() {
   S.members = (await api("/members")).members;
@@ -2098,6 +2551,9 @@ async function loadMe() {
   const r = await api("/me");
   S.me = r.me;
   S.features = r.features || {};
+  try {
+    localStorage.setItem("sg_me", JSON.stringify(r.me));
+  } catch (_) {}
 }
 async function loadAll() {
   try {
@@ -2108,6 +2564,8 @@ async function loadAll() {
   }
 }
 async function openEvent(id, from) {
+  S.jpAdd = false;
+  S.jpWin = null;
   S.backTo = from || null;
   if (S.tab !== "schedule") {
     S.tab = "schedule";
@@ -2142,6 +2600,7 @@ function signOut(silent) {
   S.token = "";
   S.me = null;
   S.events = [];
+  S.calEvents = [];
   S.members = [];
   S.notices = [];
   S.features = {};
@@ -2196,9 +2655,34 @@ setInterval(async () => {
       render();
       await loadAll();
       return;
-    } catch (_) {
-      localStorage.removeItem("sg_token");
-      S.token = "";
+    } catch (e) {
+      // 로그인이 정말 끝난 경우(401)만 로그아웃. 업데이트 배포 중이거나 인터넷이 잠깐 끊긴 경우엔 그대로 둔다
+      if (e && e.status === 401) {
+        localStorage.removeItem("sg_token");
+        localStorage.removeItem("sg_me");
+        S.token = "";
+      } else {
+        try {
+          S.me = JSON.parse(localStorage.getItem("sg_me") || "null");
+        } catch (_) {}
+        if (S.me) {
+          render();
+          toast("서버 연결이 잠시 불안정합니다. 곧 다시 불러옵니다.");
+          const retry = async (wait) => {
+            await new Promise((r) => setTimeout(r, wait));
+            try {
+              await loadMe();
+              await loadAll();
+            } catch (err) {
+              if (!(err && err.status === 401)) retry(Math.min(wait * 2, 60000));
+            }
+          };
+          retry(3000);
+          return;
+        }
+        // 저장된 정보가 없으면 잠깐 뒤 다시 시도 (로그인은 지우지 않음)
+        setTimeout(() => location.reload(), 5000);
+      }
     }
   }
   render();
